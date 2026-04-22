@@ -1,0 +1,12 @@
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${DOCKER_IMAGE_TAG:-fandogh-bridge:latest}
+    env_file:
+      - .env
+    volumes:
+      - ./app_data:/app/app_data
+      - ./app_tmp_media:/app/app_tmp_media
+    restart: unless-stopped
