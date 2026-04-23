@@ -96,10 +96,11 @@ class Settings:
     healthcheck_enabled: bool
 
     admin_ids: list[str]
+    telegram_admin_channel_id: str
     docker_image_tag: str
 
 
-DEFAULT_ALLOWED_UPDATES = ["message"]
+DEFAULT_ALLOWED_UPDATES = ["message", "callback_query"]
 
 
 def load_settings(env_file: str = ".env") -> Settings:
@@ -147,6 +148,7 @@ def load_settings(env_file: str = ".env") -> Settings:
         metrics_enabled=_bool("METRICS_ENABLED", False),
         healthcheck_enabled=_bool("HEALTHCHECK_ENABLED", False),
         admin_ids=_list("ADMIN_IDS", []),
+        telegram_admin_channel_id=_str("TELEGRAM_ADMIN_CHANNEL_ID", "").strip(),
         docker_image_tag=_str("DOCKER_IMAGE_TAG", "fandogh-bridge:latest"),
     )
 

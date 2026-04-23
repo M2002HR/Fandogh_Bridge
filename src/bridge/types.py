@@ -38,6 +38,9 @@ class IncomingMessage:
     caption: str | None = None
     source_file_id: str | None = None
     phone_number: str | None = None
+    is_callback: bool = False
+    callback_data: str | None = None
+    callback_query_id: str | None = None
     raw: dict[str, Any] | None = None
 
 

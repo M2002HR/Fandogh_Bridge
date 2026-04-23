@@ -19,6 +19,47 @@ def test_parse_contact_message() -> None:
     assert msg.phone_number == "+989121234567"
 
 
+def test_parse_callback_query() -> None:
+    update = {
+        "update_id": 12,
+        "callback_query": {
+            "id": "cb1",
+            "from": {"id": 333, "username": "u1", "first_name": "Nima"},
+            "data": "ct:page:1",
+            "message": {
+                "message_id": 9,
+                "chat": {"id": 333, "type": "private"},
+            },
+        },
+    }
+
+    msg = parse_update(Platform.TELEGRAM, update)
+    assert msg is not None
+    assert msg.is_callback is True
+    assert msg.callback_data == "ct:page:1"
+    assert msg.callback_query_id == "cb1"
+
+
+def test_parse_callback_query_without_chat_type() -> None:
+    update = {
+        "update_id": 13,
+        "callback_query": {
+            "id": "cb2",
+            "from": {"id": 444, "username": "u2", "first_name": "Sara"},
+            "data": "ct:menu",
+            "message": {
+                "message_id": 10,
+                "chat": {"id": 444},
+            },
+        },
+    }
+
+    msg = parse_update(Platform.BALE, update)
+    assert msg is not None
+    assert msg.is_callback is True
+    assert msg.callback_data == "ct:menu"
+
+
 def test_parse_ignores_non_private() -> None:
     update = {
         "update_id": 11,

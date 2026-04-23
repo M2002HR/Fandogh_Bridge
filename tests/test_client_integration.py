@@ -32,6 +32,8 @@ async def test_bot_api_client_methods(tmp_path) -> None:
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 12}})
         if url.endswith("/sendVoice"):
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 13}})
+        if url.endswith("/answerCallbackQuery"):
+            return httpx.Response(200, json={"ok": True, "result": True})
         return httpx.Response(404, json={"ok": False})
 
     transport = httpx.MockTransport(handler)
@@ -64,6 +66,7 @@ async def test_bot_api_client_methods(tmp_path) -> None:
     voice = tmp_path / "x.ogg"
     voice.write_bytes(b"voice")
     await client.send_voice("1", voice_path=voice)
+    await client.answer_callback_query("cb-id")
 
     await client.aclose()
     assert any(url.endswith("/getUpdates") for url in calls)

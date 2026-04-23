@@ -44,3 +44,18 @@ async def test_registration_state_and_contact_flow(tmp_path) -> None:
 
     await repo.delete_contact(a.id, contact.id)
     assert await repo.get_contact(a.id, contact.id) is None
+
+
+@pytest.mark.asyncio
+async def test_claim_update_is_idempotent(tmp_path) -> None:
+    db_file = tmp_path / "bridge.db"
+    await init_db(str(db_file))
+    repo = Repository(str(db_file), bridge_id_prefix="FDG", bridge_id_length=10)
+
+    first = await repo.claim_update(Platform.BALE, 123)
+    second = await repo.claim_update(Platform.BALE, 123)
+    third = await repo.claim_update(Platform.BALE, 124)
+
+    assert first is True
+    assert second is False
+    assert third is True

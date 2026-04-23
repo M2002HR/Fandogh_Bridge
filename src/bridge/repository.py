@@ -373,6 +373,22 @@ class Repository:
             await conn.commit()
             return int(cur.lastrowid)
 
+    async def claim_update(self, platform: Platform, update_id: int) -> bool:
+        now = utc_iso()
+        async with self._connect() as conn:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO processed_updates(platform, update_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (platform.value, update_id, now),
+                )
+                await conn.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
+
     async def log_message(
         self,
         source_user_id: int,

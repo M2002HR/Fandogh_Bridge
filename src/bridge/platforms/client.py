@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -23,7 +24,8 @@ class BotApiClient:
         self.token = token
         self.api_base_url = api_base_url.rstrip("/")
         self.file_base_url = file_base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=timeout_sec)
+        timeout = httpx.Timeout(connect=15.0, read=timeout_sec, write=30.0, pool=30.0)
+        self.client = httpx.AsyncClient(timeout=timeout)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -60,6 +62,7 @@ class BotApiClient:
         photo_file_id: str | None = None,
         photo_path: Path | None = None,
         caption: str | None = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         if photo_path is None and photo_file_id is None:
             raise ValueError("photo_path or photo_file_id must be provided")
@@ -68,6 +71,8 @@ class BotApiClient:
             data: dict[str, str] = {"chat_id": chat_id}
             if caption:
                 data["caption"] = caption
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             with photo_path.open("rb") as fh:
                 files = {"photo": (photo_path.name, fh, "application/octet-stream")}
                 result = await self._post("sendPhoto", data=data, files=files)
@@ -78,6 +83,8 @@ class BotApiClient:
         payload = {"chat_id": chat_id, "photo": photo_file_id}
         if caption:
             payload["caption"] = caption
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         result = await self._post("sendPhoto", json=payload)
         if not isinstance(result, dict):
             raise PlatformApiError(f"{self.platform.value}:sendPhoto invalid response")
@@ -89,6 +96,7 @@ class BotApiClient:
         voice_file_id: str | None = None,
         voice_path: Path | None = None,
         caption: str | None = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         if voice_path is None and voice_file_id is None:
             raise ValueError("voice_path or voice_file_id must be provided")
@@ -97,6 +105,8 @@ class BotApiClient:
             data: dict[str, str] = {"chat_id": chat_id}
             if caption:
                 data["caption"] = caption
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             with voice_path.open("rb") as fh:
                 files = {"voice": (voice_path.name, fh, "audio/ogg")}
                 result = await self._post("sendVoice", data=data, files=files)
@@ -107,6 +117,8 @@ class BotApiClient:
         payload = {"chat_id": chat_id, "voice": voice_file_id}
         if caption:
             payload["caption"] = caption
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         result = await self._post("sendVoice", json=payload)
         if not isinstance(result, dict):
             raise PlatformApiError(f"{self.platform.value}:sendVoice invalid response")
@@ -133,6 +145,16 @@ class BotApiClient:
             raise PlatformApiError(f"{self.platform.value}:getUserProfilePhotos invalid response")
         return result
 
+    async def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> dict:
+        payload: dict = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        result = await self._post("answerCallbackQuery", json=payload)
+        if not isinstance(result, bool):
+            # Telegram/Bale typically return bool; normalize for callers.
+            return {"ok": bool(result)}
+        return {"ok": result}
+
     async def download_file(self, file_path: str, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         url = self.file_url(file_path)
@@ -151,7 +173,7 @@ class BotApiClient:
         json: dict | None = None,
         data: dict | None = None,
         files: dict | None = None,
-    ) -> dict | list[dict]:
+    ) -> object:
         url = self._method_url(method)
         response = await self.client.post(url, json=json, data=data, files=files)
         if response.status_code != 200:

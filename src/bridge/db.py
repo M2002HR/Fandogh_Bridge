@@ -105,6 +105,16 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 CREATE INDEX IF NOT EXISTS idx_outbox_due
 ON outbox(status, next_retry_at);
+
+CREATE TABLE IF NOT EXISTS processed_updates (
+    platform TEXT NOT NULL,
+    update_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(platform, update_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processed_updates_created
+ON processed_updates(created_at);
 """
 
 
