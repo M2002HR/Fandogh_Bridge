@@ -201,3 +201,218 @@ def test_normalize_telegram_channel_target() -> None:
     assert BridgeService._normalize_telegram_channel_target("1003790742908") == "-1003790742908"
     assert BridgeService._normalize_telegram_channel_target("-1003790742908") == "-1003790742908"
     assert BridgeService._normalize_telegram_channel_target("https://t.me/example_channel") == "@example_channel"
+
+
+@pytest.mark.asyncio
+async def test_request_identifier_accepts_username_only(tmp_path) -> None:
+    db_file = tmp_path / "bridge.db"
+    await init_db(str(db_file))
+    repo = Repository(str(db_file), bridge_id_prefix="FDG", bridge_id_length=10)
+
+    requester = await repo.upsert_user_presence(Platform.BALE, "u1", "c1", "alice", "Alice")
+    await repo.mark_terms_accepted(requester.id)
+    await repo.complete_registration(requester.id, "09120000001")
+    await repo.set_user_state(
+        requester.id,
+        "REQUEST_WAIT_IDENTIFIER",
+        {"target_platform": Platform.TELEGRAM.value},
+    )
+
+    tg = DummyClient(Platform.TELEGRAM)
+    bale = DummyClient(Platform.BALE)
+    svc = BridgeService(
+        settings=DummySettings(),
+        repository=repo,
+        telegram_client=tg,
+        bale_client=bale,
+        rate_limiter=InMemoryRateLimiter(RateLimitConfig(msg_per_min=100, media_per_min=100)),
+    )
+
+    incoming = IncomingMessage(
+        platform=Platform.BALE,
+        update_id=7,
+        chat_id="c1",
+        user_id="u1",
+        username="alice",
+        display_name="Alice",
+        message_id=7,
+        content_type=ContentType.TEXT,
+        text="@target_user",
+    )
+
+    user = await repo.get_user_by_id(requester.id)
+    state = await repo.get_user_state(requester.id)
+    assert user is not None
+    assert state is not None
+    handled = await svc._handle_registered_state(user, incoming, state)
+    assert handled is True
+
+    state = await repo.get_user_state(requester.id)
+    assert state is not None
+    assert state.state == "REQUEST_WAIT_NOTE"
+    assert state.data["target_username"] == "target_user"
+    assert state.data["target_phone"] is None
+
+    await svc.telegram_client.aclose()
+    await svc.bale_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_identifier_detects_registered_username(tmp_path) -> None:
+    db_file = tmp_path / "bridge.db"
+    await init_db(str(db_file))
+    repo = Repository(str(db_file), bridge_id_prefix="FDG", bridge_id_length=10)
+
+    requester = await repo.upsert_user_presence(Platform.BALE, "u1", "c1", "alice", "Alice")
+    target = await repo.upsert_user_presence(Platform.TELEGRAM, "u2", "c2", "target_user", "Target")
+    await repo.mark_terms_accepted(requester.id)
+    await repo.complete_registration(requester.id, "09120000001")
+    await repo.mark_terms_accepted(target.id)
+    await repo.complete_registration(target.id, "09120000002")
+    await repo.set_user_state(
+        requester.id,
+        "REQUEST_WAIT_IDENTIFIER",
+        {"target_platform": Platform.TELEGRAM.value},
+    )
+
+    tg = DummyClient(Platform.TELEGRAM)
+    bale = DummyClient(Platform.BALE)
+    svc = BridgeService(
+        settings=DummySettings(),
+        repository=repo,
+        telegram_client=tg,
+        bale_client=bale,
+        rate_limiter=InMemoryRateLimiter(RateLimitConfig(msg_per_min=100, media_per_min=100)),
+    )
+
+    incoming = IncomingMessage(
+        platform=Platform.BALE,
+        update_id=8,
+        chat_id="c1",
+        user_id="u1",
+        username="alice",
+        display_name="Alice",
+        message_id=8,
+        content_type=ContentType.TEXT,
+        text="@target_user",
+    )
+
+    user = await repo.get_user_by_id(requester.id)
+    state = await repo.get_user_state(requester.id)
+    assert user is not None
+    assert state is not None
+    handled = await svc._handle_registered_state(user, incoming, state)
+    assert handled is True
+
+    new_state = await repo.get_user_state(requester.id)
+    assert new_state is None
+    assert bale.sent_messages
+    assert "ثبت‌نام شده" in bale.sent_messages[-1]["text"]
+
+    await svc.telegram_client.aclose()
+    await svc.bale_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_ambiguous_results_show_command_links(tmp_path) -> None:
+    db_file = tmp_path / "bridge.db"
+    await init_db(str(db_file))
+    repo = Repository(str(db_file), bridge_id_prefix="FDG", bridge_id_length=10)
+
+    requester = await repo.upsert_user_presence(Platform.TELEGRAM, "u1", "c1", "alice", "Alice")
+    bale_target = await repo.upsert_user_presence(Platform.BALE, "u2", "c2", "sameuser", "Bale User")
+    tg_target = await repo.upsert_user_presence(Platform.TELEGRAM, "u3", "c3", "sameuser", "Telegram User")
+    for user, phone in (
+        (requester, "09120000001"),
+        (bale_target, "09120000002"),
+        (tg_target, "09120000003"),
+    ):
+        await repo.mark_terms_accepted(user.id)
+        await repo.complete_registration(user.id, phone)
+
+    await repo.set_user_state(requester.id, "CONNECT_WAIT_IDENTIFIER", {"target_platform": ""})
+
+    tg = DummyClient(Platform.TELEGRAM)
+    bale = DummyClient(Platform.BALE)
+    svc = BridgeService(
+        settings=DummySettings(),
+        repository=repo,
+        telegram_client=tg,
+        bale_client=bale,
+        rate_limiter=InMemoryRateLimiter(RateLimitConfig(msg_per_min=100, media_per_min=100)),
+    )
+
+
+    incoming = IncomingMessage(
+        platform=Platform.TELEGRAM,
+        update_id=31,
+        chat_id="c1",
+        user_id="u1",
+        username="alice",
+        display_name="Alice",
+        message_id=31,
+        content_type=ContentType.TEXT,
+        text="@sameuser",
+    )
+
+    user = await repo.get_user_by_id(requester.id)
+    state = await repo.get_user_state(requester.id)
+    assert user is not None
+    assert state is not None
+    handled = await svc._handle_registered_state(user, incoming, state)
+    assert handled is True
+    assert tg.sent_messages
+    text = tg.sent_messages[-1]["text"]
+    assert "برای اتصال، یکی از گزینه‌های زیر را انتخاب کنید" in text
+    assert f"/connect_user_{bale_target.id}" in text
+    assert f"/connect_user_{tg_target.id}" in text
+
+    await svc.telegram_client.aclose()
+    await svc.bale_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_user_command_sets_active_session(tmp_path) -> None:
+    db_file = tmp_path / "bridge.db"
+    await init_db(str(db_file))
+    repo = Repository(str(db_file), bridge_id_prefix="FDG", bridge_id_length=10)
+
+    requester = await repo.upsert_user_presence(Platform.TELEGRAM, "u1", "c1", "alice", "Alice")
+    target = await repo.upsert_user_presence(Platform.BALE, "u2", "c2", "bob", "Bob")
+    await repo.mark_terms_accepted(requester.id)
+    await repo.complete_registration(requester.id, "09120000001")
+    await repo.mark_terms_accepted(target.id)
+    await repo.complete_registration(target.id, "09120000002")
+    await repo.set_user_state(requester.id, "CONNECT_WAIT_IDENTIFIER", {"target_platform": ""})
+
+    tg = DummyClient(Platform.TELEGRAM)
+    bale = DummyClient(Platform.BALE)
+    svc = BridgeService(
+        settings=DummySettings(),
+        repository=repo,
+        telegram_client=tg,
+        bale_client=bale,
+        rate_limiter=InMemoryRateLimiter(RateLimitConfig(msg_per_min=100, media_per_min=100)),
+    )
+
+    incoming = IncomingMessage(
+        platform=Platform.TELEGRAM,
+        update_id=32,
+        chat_id="c1",
+        user_id="u1",
+        username="alice",
+        display_name="Alice",
+        message_id=32,
+        content_type=ContentType.TEXT,
+        text="/connect_user_2",
+    )
+
+    await svc._process_incoming(incoming)
+    active = await repo.get_active_target(requester.id)
+    assert active is not None
+    assert active.id == target.id
+    assert tg.sent_messages
+    assert "اتصال فعال شد" in tg.sent_messages[-1]["text"]
+
+    await svc.telegram_client.aclose()
+    await svc.bale_client.aclose()

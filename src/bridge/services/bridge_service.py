@@ -52,7 +52,7 @@ from bridge.types import (
     User,
     UserState,
 )
-from bridge.utils import normalize_phone, parse_iso, utc_iso, utc_now
+from bridge.utils import extract_contact_identifiers, normalize_phone, parse_iso, utc_iso, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class FlowState:
     ADD_CONTACT_WAIT_ALIAS = "ADD_CONTACT_WAIT_ALIAS"
 
     REQUEST_WAIT_PLATFORM = "REQUEST_WAIT_PLATFORM"
-    REQUEST_WAIT_PHONE = "REQUEST_WAIT_PHONE"
+    REQUEST_WAIT_IDENTIFIER = "REQUEST_WAIT_IDENTIFIER"
     REQUEST_WAIT_NOTE = "REQUEST_WAIT_NOTE"
 
 
@@ -286,6 +286,22 @@ class BridgeService:
             await self._open_contact_from_command(user, contact_id)
             return
 
+        if user.is_registered and command and command.startswith("connect_user_"):
+            if await self.repository.get_active_target(user.id):
+                await self._send_text(
+                    user.platform,
+                    user.chat_id,
+                    "در حال اتصال فعال هستید. برای تغییر مخاطب ابتدا «⛔ پایان اتصال» را بزنید.",
+                    keyboard=connected_menu(),
+                )
+                return
+            target_user_id = self._parse_connect_user_command(command)
+            if target_user_id is None:
+                await self._send_main_menu(user, "لینک اتصال نامعتبر است.")
+                return
+            await self._connect_to_user_from_command(user, target_user_id)
+            return
+
         if not user.is_registered:
             await self._handle_unregistered(user, incoming, state)
             return
@@ -459,7 +475,7 @@ class BridgeService:
                     target_platform = _default_target_platform(user.platform)
                 await self.repository.set_user_state(
                     user.id,
-                    FlowState.REQUEST_WAIT_PHONE,
+                    FlowState.REQUEST_WAIT_IDENTIFIER,
                     {"target_platform": target_platform.value},
                 )
                 await self._send_text(
@@ -488,11 +504,11 @@ class BridgeService:
                 return True
 
             if len(users) > 1:
-                candidates = "\n".join([f"- {u.bridge_id} | {u.platform.value} | @{u.username or '-'}" for u in users[:8]])
+                candidates = self._format_connect_candidates(users[:8])
                 await self._send_text(
                     user.platform,
                     user.chat_id,
-                    f"چند کاربر پیدا شد. لطفاً دقیق‌تر وارد کنید:\n{candidates}",
+                    f"برای اتصال، یکی از گزینه‌های زیر را انتخاب کنید:\n{candidates}",
                     keyboard=reply_keyboard([[BTN_BACK]]),
                 )
                 return True
@@ -636,7 +652,7 @@ class BridgeService:
 
             await self.repository.set_user_state(
                 user.id,
-                FlowState.REQUEST_WAIT_PHONE,
+                FlowState.REQUEST_WAIT_IDENTIFIER,
                 {"target_platform": target_platform.value if target_platform else _default_target_platform(user.platform).value},
             )
             await self._send_text(
@@ -647,29 +663,29 @@ class BridgeService:
             )
             return True
 
-        if state.state == FlowState.REQUEST_WAIT_PHONE:
+        if state.state == FlowState.REQUEST_WAIT_IDENTIFIER:
             if text == BTN_BACK:
                 await self.repository.clear_user_state(user.id)
                 await self._send_main_menu(user, "بازگشت به منوی اصلی.")
                 return True
 
-            phone = normalize_phone(incoming.phone_number or text)
-            if not phone:
+            phone, username = extract_contact_identifiers(text, incoming.phone_number)
+            if not phone and not username:
                 await self._send_text(
                     user.platform,
                     user.chat_id,
-                    "شماره مقصد معتبر نیست. فرمت صحیح: 09xxxxxxxxx",
+                    "حداقل یکی از این‌ها را بفرستید: شماره موبایل یا آیدی تلگرام.\nنمونه: `0912xxxxxxx` یا `@username` یا هر دو در یک پیام.",
                     keyboard=reply_keyboard([[BTN_BACK]]),
                 )
                 return True
 
             target_platform = _platform_from_data(state.data.get("target_platform")) or _default_target_platform(user.platform)
-            matches = await self.repository.find_registered_users_by_identifier(phone, target_platform)
+            matches = await self._find_request_matches(phone, username, target_platform)
             if matches:
                 await self.repository.clear_user_state(user.id)
                 await self._send_main_menu(
                     user,
-                    "✅ این شماره در ربات ثبت‌نام کرده است. از گزینه «🔗 اتصال به مخاطب» استفاده کنید.",
+                    "✅ این مشخصات در ربات ثبت‌نام شده است. از گزینه «🔗 اتصال به مخاطب» استفاده کنید.",
                 )
                 return True
 
@@ -679,12 +695,13 @@ class BridgeService:
                 {
                     "target_platform": target_platform.value,
                     "target_phone": phone,
+                    "target_username": username,
                 },
             )
             await self._send_text(
                 user.platform,
                 user.chat_id,
-                "حالا یک توضیح کمک‌کننده درباره صاحب این شماره بنویسید (یا بدون توضیح).",
+                "حالا یک توضیح کمک‌کننده درباره صاحب این شماره/آیدی بنویسید (یا بدون توضیح).",
                 keyboard=note_menu(),
             )
             return True
@@ -697,7 +714,8 @@ class BridgeService:
 
             target_platform = _platform_from_data(state.data.get("target_platform")) or _default_target_platform(user.platform)
             target_phone = str(state.data.get("target_phone") or "").strip()
-            if not target_phone:
+            target_username = str(state.data.get("target_username") or "").strip()
+            if not target_phone and not target_username:
                 await self.repository.clear_user_state(user.id)
                 await self._send_main_menu(user, "درخواست نامعتبر بود. دوباره تلاش کنید.")
                 return True
@@ -709,10 +727,10 @@ class BridgeService:
             request_id = await self.repository.create_admin_request(
                 requester_user_id=user.id,
                 target_platform=target_platform,
-                target_identifier=target_phone,
+                target_identifier=self._format_admin_request_target(target_phone, target_username),
                 note=note,
             )
-            delivered = await self._notify_admins(request_id, user, target_platform, target_phone, note)
+            delivered = await self._notify_admins(request_id, user, target_platform, target_phone, target_username, note)
             await self.repository.clear_user_state(user.id)
 
             base = self._admin_request_done_text()
@@ -1083,8 +1101,10 @@ class BridgeService:
         requester: User,
         target_platform: Platform,
         target_phone: str,
+        target_username: str,
         note: str | None,
     ) -> int:
+        target_username_text = f"@{target_username}" if target_username else "-"
         message = (
             "📨 درخواست اطلاع‌رسانی جدید\n"
             f"شماره درخواست: #{request_id}\n"
@@ -1092,7 +1112,8 @@ class BridgeService:
             f"فندق‌آیدی: {requester.bridge_id}\n"
             f"پلتفرم درخواست‌دهنده: {requester.platform.value}\n"
             f"پلتفرم مقصد: {target_platform.value}\n"
-            f"شماره مقصد: {target_phone}\n"
+            f"شماره مقصد: {target_phone or '-'}\n"
+            f"آیدی تلگرام مقصد: {target_username_text}\n"
             f"توضیح کمک‌کننده: {note or '-'}"
         )
 
@@ -1159,7 +1180,7 @@ class BridgeService:
             "3) شناسه مقصد می‌تواند فندق‌آیدی یا شماره یا @username باشد.\n"
             "4) برای ذخیره مخاطب: «➕ افزودن مخاطب».\n"
             "5) برای مدیریت مخاطبین: «👥 لیست مخاطبین» (صفحه‌بندی + لینک /contact_ID).\n"
-            "6) اگر مخاطب عضو نیست: «🆘 درخواست اطلاع‌رسانی» و شماره مقصد را بدهید.\n"
+            "6) اگر مخاطب عضو نیست: «🆘 درخواست اطلاع‌رسانی» و شماره یا آیدی تلگرام مقصد را بدهید.\n"
             "7) وقتی اتصال فعال است، فقط پیام‌ها را ارسال کنید یا اتصال را پایان دهید."
         )
         keyboard = connected_menu() if await self.repository.get_active_target(user.id) else main_menu()
@@ -1171,16 +1192,17 @@ class BridgeService:
     def _admin_request_intro_text() -> str:
         return (
             "🆘 فرآیند درخواست اطلاع‌رسانی\n\n"
-            "در این بخش، شماره تلفن مخاطب موردنظر شما را دریافت می‌کنیم و سپس یک توضیح کوتاه و کمک‌کننده از شما می‌گیریم.\n"
+            "در این بخش، شماره تلفن مخاطب و/یا آیدی تلگرام او را دریافت می‌کنیم و سپس یک توضیح کوتاه و کمک‌کننده از شما می‌گیریم.\n"
             "تیم پشتیبانی در صورت امکان تلاش می‌کند به آن فرد اطلاع دهد که در ربات فندقِ پیام‌رسان مقصد ثبت‌نام کند تا امکان ارتباط شما برقرار شود.\n"
-            "شماره و توضیح شما فقط برای همین فرآیند استفاده می‌شود.\n\n"
-            "لطفاً شماره مقصد را با فرمت 09xxxxxxxxx ارسال کنید."
+            "اطلاعاتی که می‌فرستید فقط برای همین فرآیند استفاده می‌شود.\n\n"
+            "لطفاً شماره موبایل یا آیدی تلگرام را بفرستید.\n"
+            "نمونه: 09xxxxxxxxx یا @username یا هر دو در یک پیام."
         )
 
     @staticmethod
     def _admin_request_done_text() -> str:
         return (
-            "شماره تلفن و توضیح شما دریافت شد و برای تیم رسیدگی ارسال گردید.\n"
+            "اطلاعات مخاطب و توضیح شما دریافت شد و برای تیم رسیدگی ارسال گردید.\n"
             "در صورت امکان، به مخاطب اطلاع داده می‌شود که در ربات فندق ثبت‌نام کند تا ارتباط شما برقرار شود.\n"
             "از اعتماد شما سپاسگزاریم."
         )
@@ -1493,6 +1515,31 @@ class BridgeService:
         connected = bool(active and active.id == reply_source_user_id)
         return incoming_reply_actions(reply_source_user_id, connected=connected)
 
+    async def _find_request_matches(
+        self,
+        phone: str | None,
+        username: str | None,
+        target_platform: Platform,
+    ) -> list[User]:
+        results: dict[int, User] = {}
+        if phone:
+            for user in await self.repository.find_registered_users_by_identifier(phone, target_platform):
+                results[user.id] = user
+        if username:
+            identifier = username if username.startswith("@") else f"@{username}"
+            for user in await self.repository.find_registered_users_by_identifier(identifier, target_platform):
+                results[user.id] = user
+        return list(results.values())
+
+    @staticmethod
+    def _format_admin_request_target(phone: str, username: str) -> str:
+        parts: list[str] = []
+        if phone:
+            parts.append(f"phone={phone}")
+        if username:
+            parts.append(f"username=@{username}")
+        return " | ".join(parts)
+
     def _sender_header(self, source_user: User) -> str:
         platform = source_user.platform.value if self.settings.show_sender_platform else ""
         username = source_user.username or "-"
@@ -1538,6 +1585,18 @@ class BridgeService:
             return None
         return value if value > 0 else None
 
+    @staticmethod
+    def _parse_connect_user_command(command: str) -> int | None:
+        prefix = "connect_user_"
+        if not command.startswith(prefix):
+            return None
+        raw = command.removeprefix(prefix)
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
     async def _open_contact_from_command(self, user: User, contact_id: int) -> None:
         contact = await self.repository.get_contact(user.id, contact_id)
         if not contact:
@@ -1548,6 +1607,34 @@ class BridgeService:
             await self._show_contacts(user, preface="کاربر مقصد یافت نشد.", page=0)
             return
         await self._send_profile(user, contact, target, page=0)
+
+    async def _connect_to_user_from_command(self, user: User, target_user_id: int) -> None:
+        target = await self.repository.get_user_by_id(target_user_id)
+        if not target or not target.is_registered:
+            await self._send_main_menu(user, "کاربر انتخاب‌شده در دسترس نیست.")
+            return
+        if target.id == user.id:
+            await self._send_main_menu(user, "نمی‌توانید به خودتان وصل شوید.")
+            return
+
+        await self.repository.set_active_session(user.id, target.id)
+        await self.repository.clear_user_state(user.id)
+        await self._send_text(
+            user.platform,
+            user.chat_id,
+            f"🔌 اتصال فعال شد: {target.display_name or '-'} ({target.bridge_id})\nحالا متن/عکس/ویس بفرستید.",
+            keyboard=connected_menu(),
+        )
+
+    @staticmethod
+    def _format_connect_candidates(users: list[User]) -> str:
+        lines: list[str] = []
+        for user in users:
+            username = f"@{user.username}" if user.username else "@-"
+            lines.append(
+                f"- {user.bridge_id} | {user.platform.value} | {username} | /connect_user_{user.id}"
+            )
+        return "\n".join(lines)
 
     def _is_duplicate_interaction(self, user: User, incoming: IncomingMessage) -> bool:
         loop = asyncio.get_running_loop()

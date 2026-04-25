@@ -28,6 +28,15 @@ pip install -r requirements.txt
 python -m bridge.main
 ```
 
+اجرای توسعه با auto-reload:
+
+```bash
+source .venv/bin/activate
+python -m bridge.dev
+```
+
+در این حالت با تغییر فایل‌های `src`, `.env`, `pyproject.toml`, `requirements.txt` ربات به‌صورت خودکار stop/start می‌شود.
+
 3. اجرای Docker:
 
 ```bash
@@ -48,6 +57,15 @@ docker compose up --build -d
 - مسیرها:
   - `DB_URL=sqlite+aiosqlite:///./app_data/bridge.db`
   - `MEDIA_TMP_DIR=./app_tmp_media`
+- تنظیمات watcher توسعه:
+  - `DEV_WATCH_COMMAND`
+  - `DEV_WATCH_PATHS`
+  - `DEV_WATCH_IGNORE_DIRS`
+  - `DEV_WATCH_DEBOUNCE_MS`
+  - `DEV_WATCH_POLL_DELAY_MS`
+  - `DEV_WATCH_FORCE_POLLING`
+  - `DEV_WATCH_TERM_TIMEOUT_SEC`
+  - `DEV_WATCH_RUST_TIMEOUT_MS`
 
 ## Testing
 
