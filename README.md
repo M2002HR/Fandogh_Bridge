@@ -11,15 +11,30 @@
 - ذخیره مخاطب با نام دلخواه (مخاطبین فندقی)
 - مدیریت مخاطب با دکمه شیشه‌ای: اتصال، بلاک/آنبلاک، مشاهده پروفایل، حذف
 - لیست مخاطبین صفحه‌بندی‌شده (۵ مورد در هر صفحه) با لینک `/contact_<id>`
-- درخواست اطلاع‌رسانی به ادمین برای مخاطب‌های ثبت‌نام‌نشده (شماره + توضیح)
+- درخواست اطلاع‌رسانی به ادمین برای مخاطب‌های ثبت‌نام‌نشده (شماره و/یا نام کاربری + توضیح)
+- اگر مخاطبِ درخواست‌شده ثبت‌نام کند، به درخواست‌دهنده اعلان داده می‌شود
 - رله دوطرفه `text`, `photo`, `voice`
 - دکمه شیشه‌ای زیر هر پیام دریافتی برای `اتصال/پاسخ`
+- اعلان مشاهده پیام با دکمه `👁️ مشاهده شد` و ارسال تایید برای فرستنده
 - صف retry با backoff تا 24 ساعت
+- کاتالوگ فروش JSON برای تعریف بسته‌ها، سقف مصرف و روش‌های پرداخت
+- نمایش اعتبار باقی‌مانده و خرید بسته از داخل ربات
+- نمایش تاریخچه خرید/پرداخت با وضعیت هر سفارش
+- پرداخت داخل تلگرام با Telegram Stars (ثبت در کانال بررسی ادمین + تایید/رد)
+- پرداخت TON خودکار در تلگرام با Crypto Pay API (شارژ خودکار پس از پرداخت موفق)
+- پرداخت کیف‌پولی مستقیم در بله (Bale Wallet Invoice) (ثبت در کانال بررسی ادمین + تایید/رد)
+- ثبت پرداخت دستی کارت‌به‌کارت و TON با ارسال رسید و تایید ادمین در کانال
+- خرید بسته برای خود یا دیگران (با شماره، @username یا فندق‌آیدی)
+- نمایش قیمت‌ها هم‌زمان به USDT، تومان و TON
+- نرخ USDT ثابت و قابل تنظیم از `.env` (بدون نمایش نرخ تبدیل به کاربر)
+- گزینه جداگانه برای ارتباط با پشتیبانی
+- بهبود UI تلگرام با دکمه‌های رنگی (Button Style)، منوی Commands و لیست Commands
 
 ## Quick Start
 
 1. مقداردهی توکن‌ها در `.env`
-2. اجرای محلی:
+2. تنظیم کاتالوگ فروش در `config/sales_catalog.json`
+3. اجرای محلی:
 
 ```bash
 python -m venv .venv
@@ -37,7 +52,7 @@ python -m bridge.dev
 
 در این حالت با تغییر فایل‌های `src`, `.env`, `pyproject.toml`, `requirements.txt` ربات به‌صورت خودکار stop/start می‌شود.
 
-3. اجرای Docker:
+4. اجرای Docker:
 
 ```bash
 docker compose up --build -d
@@ -51,12 +66,41 @@ docker compose up --build -d
   - برای کانال خصوصی باید `chat_id` عددی (مثل `-100...`) تنظیم شود.
   - اگر مقدار را به شکل `100...` بگذارید، برنامه خودش به `-100...` تبدیل می‌کند.
   - لینک دعوت خصوصی (`https://t.me/+...`) به‌تنهایی برای `sendMessage` کافی نیست.
+  - روش‌های پرداخت دستی فقط وقتی نمایش داده می‌شوند که این کانال تنظیم شده باشد.
+- `BALE_WALLET_PROVIDER_TOKEN` برای پرداخت رسمی کیف پول بله (در `.env` تنظیم شود).
+- تنظیمات بهبود UI تلگرام:
+  - `TELEGRAM_ENABLE_BUTTON_STYLES=false` (پیش‌فرض بدون رنگ؛ ساختار دکمه‌ها حفظ می‌شود)
+  - `TELEGRAM_BUTTON_STYLE_MODE=none` (برای فعال‌سازی رنگ بعدا: `auto`)
+  - `TELEGRAM_SET_COMMANDS_ON_START=true` (ثبت خودکار `/commands` در استارت سرویس)
+  - `TELEGRAM_SET_MENU_BUTTON_ON_START=true` (تنظیم منوی پایین ورودی روی حالت Commands)
+- پرداخت TON خودکار تلگرام:
+  - `TELEGRAM_TON_PAY_ENABLED=true`
+  - `TELEGRAM_TON_PAY_API_TOKEN=<token-from-@CryptoBot>`
+  - `TELEGRAM_TON_PAY_API_BASE_URL=https://pay.crypt.bot/api`
+  - `TELEGRAM_TON_PAY_ASSET=TON`
+  - `TELEGRAM_TON_PAY_POLL_INTERVAL_SEC=15`
+  - اگر این مقادیر تنظیم نشوند، گزینه پرداخت TON خودکار در منو نمایش داده نمی‌شود.
+- تبدیل قیمت USDT به TON برای نمایش:
+  - `TON_RATE_API_ENABLED=true`
+  - `TON_RATE_API_URL=https://data-api.binance.vision/api/v3/ticker/price`
+  - `TON_RATE_API_SYMBOL=TONUSDT`
+  - `TON_RATE_API_CACHE_SEC=300`
+  - `TON_RATE_API_TIMEOUT_SEC=8`
+- `SALES_CONFIG_PATH` مسیر فایل JSON فروش و اعتبار را مشخص می‌کند.
+- فایل `config/sales_catalog.json` شامل این موارد است:
+  - قواعد اعتبار: هر پیام متنی یا هر چند ثانیه ویس و سقف حجم عکس
+  - بسته‌ها فقط با `price_usd` ذخیره می‌شوند
+  - قیمت Stars به‌صورت داینامیک محاسبه می‌شود: هر `100 ⭐ = 1.5 USDT`
+  - قیمت کیف پول بله از نرخ ثابت USDT در `.env` محاسبه می‌شود (`USDT_FIXED_TOMAN_RATE`) و در متن قیمت کاربر نمایش جداگانه ندارد
+  - روش‌های پرداخت و مشخصات کارت/شبا/کیف پول TON
+  - شناسه و متن پشتیبانی
 - برای دریافت callback دکمه‌های شیشه‌ای:
-  - `TELEGRAM_ALLOWED_UPDATES=["message","callback_query"]`
-  - `BALE_ALLOWED_UPDATES=["message","callback_query"]`
+  - `TELEGRAM_ALLOWED_UPDATES=["message","callback_query","pre_checkout_query"]`
+  - `BALE_ALLOWED_UPDATES=["message","callback_query","pre_checkout_query"]`
 - مسیرها:
   - `DB_URL=sqlite+aiosqlite:///./app_data/bridge.db`
   - `MEDIA_TMP_DIR=./app_tmp_media`
+  - `SALES_CONFIG_PATH=./config/sales_catalog.json`
 - تنظیمات watcher توسعه:
   - `DEV_WATCH_COMMAND`
   - `DEV_WATCH_PATHS`
