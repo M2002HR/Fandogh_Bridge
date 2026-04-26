@@ -47,10 +47,18 @@ class BotApiClient:
             raise PlatformApiError(f"{self.platform.value}:getUpdates invalid response type")
         return response
 
-    async def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        reply_markup: dict | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> dict:
         payload: dict = {"chat_id": chat_id, "text": text}
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        if reply_to_message_id and reply_to_message_id > 0:
+            payload["reply_to_message_id"] = reply_to_message_id
         result = await self._post("sendMessage", json=payload)
         if not isinstance(result, dict):
             raise PlatformApiError(f"{self.platform.value}:sendMessage invalid response")
@@ -154,6 +162,70 @@ class BotApiClient:
             # Telegram/Bale typically return bool; normalize for callers.
             return {"ok": bool(result)}
         return {"ok": result}
+
+    async def answer_pre_checkout_query(self, pre_checkout_query_id: str, ok: bool, error_message: str | None = None) -> dict:
+        payload: dict = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
+        if error_message:
+            payload["error_message"] = error_message
+        result = await self._post("answerPreCheckoutQuery", json=payload)
+        if not isinstance(result, bool):
+            return {"ok": bool(result)}
+        return {"ok": result}
+
+    async def set_my_commands(
+        self,
+        commands: list[dict[str, str]],
+        *,
+        language_code: str | None = None,
+        scope: dict | None = None,
+    ) -> dict:
+        payload: dict = {"commands": commands}
+        if language_code:
+            payload["language_code"] = language_code
+        if scope:
+            payload["scope"] = scope
+        result = await self._post("setMyCommands", json=payload)
+        if not isinstance(result, bool):
+            return {"ok": bool(result)}
+        return {"ok": result}
+
+    async def set_chat_menu_button(self, chat_id: str | None = None, menu_button: dict | None = None) -> dict:
+        payload: dict = {}
+        if chat_id is not None and chat_id != "":
+            payload["chat_id"] = int(chat_id) if str(chat_id).lstrip("-").isdigit() else str(chat_id)
+        if menu_button:
+            payload["menu_button"] = menu_button
+        result = await self._post("setChatMenuButton", json=payload)
+        if not isinstance(result, bool):
+            return {"ok": bool(result)}
+        return {"ok": result}
+
+    async def send_invoice(
+        self,
+        *,
+        chat_id: str,
+        title: str,
+        description: str,
+        payload: str,
+        currency: str | None = None,
+        prices: list[dict],
+        provider_token: str | None = None,
+    ) -> dict:
+        data = {
+            "chat_id": chat_id,
+            "title": title,
+            "description": description,
+            "payload": payload,
+            "prices": prices,
+        }
+        if currency:
+            data["currency"] = currency
+        if provider_token:
+            data["provider_token"] = provider_token
+        result = await self._post("sendInvoice", json=data)
+        if not isinstance(result, dict):
+            raise PlatformApiError(f"{self.platform.value}:sendInvoice invalid response")
+        return result
 
     async def download_file(self, file_path: str, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)

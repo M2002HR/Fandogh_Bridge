@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,17 @@ async def test_bot_api_client_methods(tmp_path) -> None:
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 13}})
         if url.endswith("/answerCallbackQuery"):
             return httpx.Response(200, json={"ok": True, "result": True})
+        if url.endswith("/answerPreCheckoutQuery"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["pre_checkout_query_id"] == "pcq-id"
+            assert payload["ok"] is True
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if url.endswith("/sendInvoice"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["currency"] == "XTR"
+            assert "provider_token" not in payload
+            assert payload["prices"] == [{"label": "Starter", "amount": 250}]
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 14}})
         return httpx.Response(404, json={"ok": False})
 
     transport = httpx.MockTransport(handler)
@@ -67,7 +79,18 @@ async def test_bot_api_client_methods(tmp_path) -> None:
     voice.write_bytes(b"voice")
     await client.send_voice("1", voice_path=voice)
     await client.answer_callback_query("cb-id")
+    await client.answer_pre_checkout_query("pcq-id", ok=True)
+    await client.send_invoice(
+        chat_id="1",
+        title="Starter",
+        description="Starter package",
+        payload="stars:starter-100:1:abc123",
+        currency="XTR",
+        prices=[{"label": "Starter", "amount": 250}],
+    )
 
     await client.aclose()
     assert any(url.endswith("/getUpdates") for url in calls)
     assert any(url.endswith("/sendMessage") for url in calls)
+    assert any(url.endswith("/answerPreCheckoutQuery") for url in calls)
+    assert any(url.endswith("/sendInvoice") for url in calls)
