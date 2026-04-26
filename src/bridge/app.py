@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from bridge.config import load_settings, sqlite_path
+from bridge.crypto_pay import CryptoPayClient
 from bridge.db import init_db
 from bridge.platforms.client import BotApiClient
 from bridge.rate_limit import InMemoryRateLimiter, RateLimitConfig
 from bridge.repository import Repository
+from bridge.sales import load_sales_catalog
 from bridge.services.bridge_service import BridgeService
 from bridge.types import Platform
 
@@ -19,6 +21,7 @@ async def build_service(env_file: str = ".env") -> BridgeService:
         bridge_id_prefix=settings.bridge_id_prefix,
         bridge_id_length=settings.bridge_id_length,
     )
+    sales_catalog = load_sales_catalog(settings.sales_config_path)
 
     telegram_client = BotApiClient(
         platform=Platform.TELEGRAM,
@@ -42,10 +45,20 @@ async def build_service(env_file: str = ".env") -> BridgeService:
         )
     )
 
+    crypto_pay_client = None
+    if settings.telegram_ton_pay_enabled and settings.telegram_ton_pay_api_token:
+        crypto_pay_client = CryptoPayClient(
+            api_token=settings.telegram_ton_pay_api_token,
+            base_url=settings.telegram_ton_pay_api_base_url,
+            timeout_sec=settings.telegram_ton_pay_timeout_sec,
+        )
+
     return BridgeService(
         settings=settings,
+        sales_catalog=sales_catalog,
         repository=repository,
         telegram_client=telegram_client,
         bale_client=bale_client,
         rate_limiter=limiter,
+        crypto_pay_client=crypto_pay_client,
     )

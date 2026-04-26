@@ -15,6 +15,9 @@ class ContentType(str, Enum):
     PHOTO = "PHOTO"
     VOICE = "VOICE"
     CONTACT = "CONTACT"
+    UNSUPPORTED = "UNSUPPORTED"
+    PRE_CHECKOUT = "PRE_CHECKOUT"
+    SUCCESSFUL_PAYMENT = "SUCCESSFUL_PAYMENT"
 
 
 class DeliveryStatus(str, Enum):
@@ -42,6 +45,16 @@ class IncomingMessage:
     callback_data: str | None = None
     callback_query_id: str | None = None
     raw: dict[str, Any] | None = None
+    chat_type: str | None = "private"
+    source_file_size: int | None = None
+    voice_duration_sec: int | None = None
+    payment_payload: str | None = None
+    payment_currency: str | None = None
+    payment_total_amount: int | None = None
+    telegram_payment_charge_id: str | None = None
+    provider_payment_charge_id: str | None = None
+    pre_checkout_query_id: str | None = None
+    unsupported_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -88,6 +101,51 @@ class OutboxItem:
     attempts: int
     next_retry_at: str
     expires_at: str
+
+
+@dataclass(slots=True)
+class CreditWallet:
+    identity_key: str
+    text_units_remaining: int
+    voice_minutes_remaining: int
+    photo_count_remaining: int
+    updated_at: str
+
+
+@dataclass(slots=True)
+class UsdtRateRecord:
+    date_local: str
+    rate_toman: int
+    source: str | None
+    raw_text: str | None
+    fetched_at: str
+
+
+@dataclass(slots=True)
+class PaymentOrder:
+    id: int
+    requester_user_id: int
+    beneficiary_user_id: int
+    identity_key: str
+    package_id: str
+    payment_method: str
+    status: str
+    amount_usd: float
+    amount_stars: int | None
+    invoice_payload: str | None
+    telegram_charge_id: str | None
+    provider_charge_id: str | None
+    receipt_file_id: str | None
+    receipt_file_platform: Platform | None
+    receipt_caption: str | None
+    account_id: str | None
+    admin_channel_chat_id: str | None
+    admin_channel_message_id: int | None
+    approved_by_platform: Platform | None
+    approved_by_user_id: str | None
+    approval_note: str | None
+    created_at: str
+    updated_at: str
 
 
 class BridgeError(Exception):

@@ -58,6 +58,10 @@ class Settings:
     telegram_file_base_url: str
     telegram_poll_timeout_sec: int
     telegram_allowed_updates: list[str]
+    telegram_enable_button_styles: bool
+    telegram_button_style_mode: str
+    telegram_set_commands_on_start: bool
+    telegram_set_menu_button_on_start: bool
 
     bale_bot_token: str
     bale_api_base_url: str
@@ -97,10 +101,25 @@ class Settings:
 
     admin_ids: list[str]
     telegram_admin_channel_id: str
+    bale_wallet_provider_token: str
+    telegram_ton_pay_enabled: bool
+    telegram_ton_pay_api_token: str
+    telegram_ton_pay_api_base_url: str
+    telegram_ton_pay_asset: str
+    telegram_ton_pay_poll_interval_sec: int
+    telegram_ton_pay_timeout_sec: int
+    ton_rate_api_enabled: bool
+    ton_rate_api_url: str
+    ton_rate_api_symbol: str
+    ton_rate_api_cache_sec: int
+    ton_rate_api_timeout_sec: int
+    usdt_fixed_toman_rate: int
+    sales_config_path: str
     docker_image_tag: str
 
 
-DEFAULT_ALLOWED_UPDATES = ["message", "callback_query"]
+DEFAULT_TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "pre_checkout_query"]
+DEFAULT_BALE_ALLOWED_UPDATES = ["message", "callback_query", "pre_checkout_query"]
 
 
 def load_settings(env_file: str = ".env") -> Settings:
@@ -116,12 +135,16 @@ def load_settings(env_file: str = ".env") -> Settings:
         telegram_api_base_url=_str("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
         telegram_file_base_url=_str("TELEGRAM_FILE_BASE_URL", "https://api.telegram.org/file"),
         telegram_poll_timeout_sec=_int("TELEGRAM_POLL_TIMEOUT_SEC", 30),
-        telegram_allowed_updates=_list("TELEGRAM_ALLOWED_UPDATES", DEFAULT_ALLOWED_UPDATES),
+        telegram_allowed_updates=_list("TELEGRAM_ALLOWED_UPDATES", DEFAULT_TELEGRAM_ALLOWED_UPDATES),
+        telegram_enable_button_styles=_bool("TELEGRAM_ENABLE_BUTTON_STYLES", False),
+        telegram_button_style_mode=_str("TELEGRAM_BUTTON_STYLE_MODE", "none").strip().lower() or "none",
+        telegram_set_commands_on_start=_bool("TELEGRAM_SET_COMMANDS_ON_START", True),
+        telegram_set_menu_button_on_start=_bool("TELEGRAM_SET_MENU_BUTTON_ON_START", True),
         bale_bot_token=_str("BALE_BOT_TOKEN", ""),
         bale_api_base_url=_str("BALE_API_BASE_URL", "https://tapi.bale.ai"),
         bale_file_base_url=_str("BALE_FILE_BASE_URL", "https://tapi.bale.ai/file"),
         bale_poll_timeout_sec=_int("BALE_POLL_TIMEOUT_SEC", 30),
-        bale_allowed_updates=_list("BALE_ALLOWED_UPDATES", DEFAULT_ALLOWED_UPDATES),
+        bale_allowed_updates=_list("BALE_ALLOWED_UPDATES", DEFAULT_BALE_ALLOWED_UPDATES),
         db_url=_str("DB_URL", "sqlite+aiosqlite:///./data/bridge.db"),
         media_tmp_dir=_str("MEDIA_TMP_DIR", "./tmp_media"),
         media_max_download_mb=_int("MEDIA_MAX_DOWNLOAD_MB", 20),
@@ -149,8 +172,25 @@ def load_settings(env_file: str = ".env") -> Settings:
         healthcheck_enabled=_bool("HEALTHCHECK_ENABLED", False),
         admin_ids=_list("ADMIN_IDS", []),
         telegram_admin_channel_id=_str("TELEGRAM_ADMIN_CHANNEL_ID", "").strip(),
+        bale_wallet_provider_token=_str("BALE_WALLET_PROVIDER_TOKEN", "").strip(),
+        telegram_ton_pay_enabled=_bool("TELEGRAM_TON_PAY_ENABLED", False),
+        telegram_ton_pay_api_token=_str("TELEGRAM_TON_PAY_API_TOKEN", "").strip(),
+        telegram_ton_pay_api_base_url=_str("TELEGRAM_TON_PAY_API_BASE_URL", "https://pay.crypt.bot/api").strip(),
+        telegram_ton_pay_asset=_str("TELEGRAM_TON_PAY_ASSET", "TON").strip().upper() or "TON",
+        telegram_ton_pay_poll_interval_sec=_int("TELEGRAM_TON_PAY_POLL_INTERVAL_SEC", 15),
+        telegram_ton_pay_timeout_sec=_int("TELEGRAM_TON_PAY_TIMEOUT_SEC", 12),
+        ton_rate_api_enabled=_bool("TON_RATE_API_ENABLED", True),
+        ton_rate_api_url=_str("TON_RATE_API_URL", "https://data-api.binance.vision/api/v3/ticker/price").strip(),
+        ton_rate_api_symbol=_str("TON_RATE_API_SYMBOL", "TONUSDT").strip().upper() or "TONUSDT",
+        ton_rate_api_cache_sec=max(30, _int("TON_RATE_API_CACHE_SEC", 300)),
+        ton_rate_api_timeout_sec=max(3, _int("TON_RATE_API_TIMEOUT_SEC", 8)),
+        usdt_fixed_toman_rate=max(0, _int("USDT_FIXED_TOMAN_RATE", 150000)),
+        sales_config_path=_str("SALES_CONFIG_PATH", "./config/sales_catalog.json").strip(),
         docker_image_tag=_str("DOCKER_IMAGE_TAG", "fandogh-bridge:latest"),
     )
+
+    if settings.telegram_button_style_mode not in {"none", "auto"}:
+        settings.telegram_button_style_mode = "none"
 
     if not settings.telegram_bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -159,6 +199,7 @@ def load_settings(env_file: str = ".env") -> Settings:
 
     Path(settings.media_tmp_dir).mkdir(parents=True, exist_ok=True)
     Path(_db_path_from_url(settings.db_url)).parent.mkdir(parents=True, exist_ok=True)
+    Path(settings.sales_config_path).parent.mkdir(parents=True, exist_ok=True)
     return settings
 
 

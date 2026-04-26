@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "enforce_credits": true,
+  "usdt_to_toman_rate": 150000,
+  "usdt_rate_channel": "",
+  "usdt_rate_cache_sec": 180,
+  "usdt_rate_refresh_hour_local": 11,
+  "usdt_rate_timezone": "Asia/Tehran",
+  "support_contact_id": "@fandogh_manager",
+  "support_message": "برای پیگیری پرداخت، سوال‌های مالی، مشکل در شارژ اعتبار یا هر ابهام مرتبط با بسته‌ها، با پشتیبانی فندق در ارتباط باشید.",
+  "credit_rules": {
+    "text_segment_chars": 0,
+    "voice_credit_seconds": 60,
+    "photo_max_file_mb": 10,
+    "photo_credit_unit": 1
+  },
+  "starter_credits": {
+    "text_units": 2,
+    "voice_minutes": 1,
+    "photo_count": 0
+  },
+  "payment_methods": [
+    {
+      "id": "telegram_stars",
+      "enabled": true,
+      "title": "⭐ پرداخت با استار",
+      "note": "پرداخت رسمی داخل تلگرام برای خرید سرویس دیجیتال",
+      "provider_token": ""
+    },
+    {
+      "id": "bale_wallet",
+      "enabled": true,
+      "title": "🟧 کیف پول بله",
+      "note": "پرداخت مستقیم با کیف پول بله",
+      "provider_token": "REPLACE_ME_BALE_PROVIDER_TOKEN"
+    },
+    {
+      "id": "manual_bank_transfer",
+      "enabled": true,
+      "title": "🏦 کارت به کارت",
+      "note": "رسید پرداخت برای بررسی ادمین ارسال می‌شود",
+      "provider_token": ""
+    },
+    {
+      "id": "manual_usdt_transfer",
+      "enabled": true,
+      "title": "💵 پرداخت تتر",
+      "note": "",
+      "provider_token": ""
+    }
+  ],
+  "bank_accounts": [
+    {
+      "id": "iran-main",
+      "title": "حساب اصلی فروش",
+      "holder_name": "محمدحسین رضایتی",
+      "card_number": "6219861901675883",
+      "account_number": "",
+      "sheba": "IR290560611828005114042501"
+    }
+  ],
+  "usdt_wallets": [
+    {
+      "id": "usdt-main",
+      "title": "کیف پول اصلی تتر",
+      "network": "TRC20",
+      "wallet_address": "TV2hr2tA8ujUcgoNSsHR5A2ARHsP3TEw5b",
+      "memo": "شناسه فندق یا شماره موبایل را در قسمت memo ارسال کنید."
+    }
+  ],
+  "packages": [
+    {
+      "id": "starter-package",
+      "title": "بسته شروع",
+      "description": "برای مصرف سبک و شروع کار",
+      "price_usd": 1,
+      "payment_methods": [
+        "telegram_stars",
+        "bale_wallet",
+        "manual_bank_transfer",
+        "manual_usdt_transfer"
+      ],
+      "credits": {
+        "text_units": 10,
+        "voice_minutes": 3,
+        "photo_count": 1
+      }
+    },
+    {
+      "id": "standard-package",
+      "title": "بسته استاندارد",
+      "description": "متعادل برای استفاده روزمره و به‌صرفه‌تر از بسته پایه",
+      "price_usd": 3,
+      "payment_methods": [
+        "telegram_stars",
+        "bale_wallet",
+        "manual_bank_transfer",
+        "manual_usdt_transfer"
+      ],
+      "credits": {
+        "text_units": 40,
+        "voice_minutes": 10,
+        "photo_count": 5
+      }
+    },
+    {
+      "id": "plus-package",
+      "title": "بسته پلاس",
+      "description": "برای استفاده سنگین‌تر با ارزش خرید بالاتر",
+      "price_usd": 10,
+      "payment_methods": [
+        "telegram_stars",
+        "bale_wallet",
+        "manual_bank_transfer",
+        "manual_usdt_transfer"
+      ],
+      "credits": {
+        "text_units": 150,
+        "voice_minutes": 30,
+        "photo_count": 20
+      }
+    },
+    {
+      "id": "max-package",
+      "title": "بسته مکس",
+      "description": "به‌صرفه‌ترین بسته برای مصرف بالا",
+      "price_usd": 20,
+      "payment_methods": [
+        "telegram_stars",
+        "bale_wallet",
+        "manual_bank_transfer",
+        "manual_usdt_transfer"
+      ],
+      "credits": {
+        "text_units": 500,
+        "voice_minutes": 80,
+        "photo_count": 50
+      }
+    }
+  ],
+  "pay_support_text": "برای پیگیری پرداخت، وضعیت رسید یا گزارش خطا با پشتیبانی فروش فندق در ارتباط باشید."
+}
