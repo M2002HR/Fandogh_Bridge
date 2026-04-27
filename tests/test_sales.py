@@ -8,8 +8,8 @@ def test_load_sales_catalog_and_rules() -> None:
 
     assert catalog.version == 1
     assert len(catalog.packages) == 4
-    assert catalog.package_by_id("starter-100") is not None
-    assert catalog.package_by_id("max-1600") is not None
+    assert catalog.package_by_id("starter-package") is not None
+    assert catalog.package_by_id("max-package") is not None
     assert catalog.payment_method("telegram_stars") is not None
     assert catalog.usdt_to_toman_rate == 150000
     assert catalog.usdt_rate_channel == ""

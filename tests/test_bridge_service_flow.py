@@ -3,13 +3,14 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from bridge.db import init_db
 from bridge.platforms.client import BotApiClient
 from bridge.rate_limit import InMemoryRateLimiter, RateLimitConfig
 from bridge.repository import Repository
-from bridge.sales import load_sales_catalog
+from bridge.sales import PaymentMethod, load_sales_catalog
 from bridge.services.bridge_service import BridgeService, FlowState
 from bridge.services.ui import BTN_PAYMENT_HISTORY
 from bridge.types import ContentType, IncomingMessage, Platform
@@ -137,6 +138,10 @@ class FakeCryptoPayClient:
 class DummySettings:
     telegram_poll_timeout_sec = 30
     bale_poll_timeout_sec = 30
+    log_retention_days = 30
+    log_cleanup_interval_sec = 3600
+    audit_events_enabled = True
+    audit_capture_full_text = True
     telegram_allowed_updates = ["message", "callback_query", "pre_checkout_query"]
     telegram_enable_button_styles = False
     telegram_button_style_mode = "none"
@@ -180,7 +185,24 @@ def make_test_catalog():
     catalog = copy.deepcopy(load_sales_catalog(str(Path(__file__).resolve().parents[1] / "config" / "sales_catalog.json")))
     catalog.rules.enforce_credits = False
     catalog.usdt_rate_channel = ""
+    if "telegram_ton_wallet" not in catalog.payment_methods:
+        catalog.payment_methods["telegram_ton_wallet"] = PaymentMethod(
+            id="telegram_ton_wallet",
+            enabled=True,
+            title="TON Wallet",
+            note="",
+            provider_token="",
+        )
+    for package in catalog.packages:
+        if "telegram_ton_wallet" not in package.payment_methods:
+            package.payment_methods.append("telegram_ton_wallet")
     return catalog
+
+
+async def _audit_count(db_file: Path, event_type: str) -> int:
+    async with aiosqlite.connect(db_file) as conn:
+        row = await (await conn.execute("SELECT COUNT(1) FROM audit_events WHERE event_type = ?", (event_type,))).fetchone()
+    return int(row[0])
 
 
 @pytest.mark.asyncio
@@ -276,6 +298,9 @@ async def test_relay_success_reports_delivery_status(tmp_path) -> None:
 
     assert bale.sent_messages
     assert tg.sent_messages[-1]["text"] == "✅ ارسال با موفقیت انجام شد."
+    async with aiosqlite.connect(db_file) as conn:
+        row = await (await conn.execute("SELECT COUNT(1) FROM audit_events WHERE event_type = 'delivery.sent'")).fetchone()
+    assert int(row[0]) >= 1
 
     await svc.telegram_client.aclose()
     await svc.bale_client.aclose()
@@ -294,7 +319,7 @@ async def test_payment_history_menu_and_detail_callback(tmp_path) -> None:
         requester_user_id=user.id,
         beneficiary_user_id=user.id,
         identity_key="telegram:u1",
-        package_id="starter-100",
+        package_id="starter-package",
         payment_method="telegram_stars",
         status="PENDING_REVIEW",
         amount_usd=0.01,
@@ -876,10 +901,10 @@ async def test_stars_payment_flow_requires_admin_approval_and_credits_requester(
 
     user = await repo.get_user_by_id(telegram_user.id)
     assert user is not None
-    await svc._start_package_payment(user, "starter-100", "telegram_stars")
+    await svc._start_package_payment(user, "starter-package", "telegram_stars")
     assert tg.sent_invoices
     payload = tg.sent_invoices[-1]["payload"]
-    starter = svc.sales_catalog.package_by_id("starter-100")
+    starter = svc.sales_catalog.package_by_id("starter-package")
     assert starter is not None
     stars_price = svc._stars_price(starter)
     assert stars_price is not None
@@ -946,11 +971,14 @@ async def test_stars_payment_flow_requires_admin_approval_and_credits_requester(
     await svc._handle_admin_callback(admin_callback)
 
     wallet = await repo.get_wallet("telegram:u1")
-    assert wallet.text_units_remaining == 100
-    assert wallet.voice_minutes_remaining == 10
-    assert wallet.photo_count_remaining == 10
+    assert wallet.text_units_remaining == starter.credits.text_units
+    assert wallet.voice_minutes_remaining == starter.credits.voice_minutes
+    assert wallet.photo_count_remaining == starter.credits.photo_count
     assert any("تایید شد" in item["text"] or "شارژ شد" in item["text"] for item in tg.sent_messages)
     assert not any("شارژ شد" in item["text"] for item in bale.sent_messages)
+    assert await _audit_count(db_file, "payment.order.created") >= 1
+    assert await _audit_count(db_file, "payment.invoice.sent") >= 1
+    assert await _audit_count(db_file, "payment.approved") >= 1
 
     await svc.telegram_client.aclose()
     await svc.bale_client.aclose()
@@ -984,7 +1012,7 @@ async def test_manual_bank_receipt_from_bale_goes_to_admin_channel_and_approval_
     await repo.set_user_state(
         bale_user.id,
         FlowState.PAYMENT_MANUAL_WAIT_RECEIPT,
-        {"package_id": "starter-100", "payment_method": "manual_bank_transfer", "account_id": "iran-main"},
+        {"package_id": "starter-package", "payment_method": "manual_bank_transfer", "account_id": "iran-main"},
     )
     state = await repo.get_user_state(bale_user.id)
     user = await repo.get_user_by_id(bale_user.id)
@@ -1031,11 +1059,15 @@ async def test_manual_bank_receipt_from_bale_goes_to_admin_channel_and_approval_
     await svc._handle_admin_callback(admin_callback)
 
     wallet = await repo.get_wallet("bale:u1")
-    assert wallet.text_units_remaining == 100
-    assert wallet.voice_minutes_remaining == 10
-    assert wallet.photo_count_remaining == 10
+    starter = svc.sales_catalog.package_by_id("starter-package")
+    assert starter is not None
+    assert wallet.text_units_remaining == starter.credits.text_units
+    assert wallet.voice_minutes_remaining == starter.credits.voice_minutes
+    assert wallet.photo_count_remaining == starter.credits.photo_count
     assert any("تایید شد" in item["text"] for item in bale.sent_messages)
     assert not any("تایید شد" in item["text"] for item in tg.sent_messages if item["chat_id"] == "c2")
+    assert await _audit_count(db_file, "payment.order.created") >= 1
+    assert await _audit_count(db_file, "payment.approved") >= 1
 
 
 @pytest.mark.asyncio
@@ -1063,11 +1095,11 @@ async def test_bale_wallet_payment_flow_credits_target_wallet(tmp_path) -> None:
 
     user = await repo.get_user_by_id(bale_user.id)
     assert user is not None
-    starter = svc.sales_catalog.package_by_id("starter-100")
+    starter = svc.sales_catalog.package_by_id("starter-package")
     assert starter is not None
     wallet_rial = svc._wallet_price_rial(starter)
     assert wallet_rial is not None
-    await svc._start_package_payment(user, "starter-100", "bale_wallet")
+    await svc._start_package_payment(user, "starter-package", "bale_wallet")
 
     assert bale.sent_invoices
     invoice = bale.sent_invoices[-1]
@@ -1135,9 +1167,9 @@ async def test_bale_wallet_payment_flow_credits_target_wallet(tmp_path) -> None:
     await svc._handle_admin_callback(admin_callback)
 
     wallet = await repo.get_wallet("bale:u1")
-    assert wallet.text_units_remaining == 100
-    assert wallet.voice_minutes_remaining == 10
-    assert wallet.photo_count_remaining == 10
+    assert wallet.text_units_remaining == starter.credits.text_units
+    assert wallet.voice_minutes_remaining == starter.credits.voice_minutes
+    assert wallet.photo_count_remaining == starter.credits.photo_count
     assert any("تایید شد" in item["text"] or "شارژ شد" in item["text"] for item in bale.sent_messages)
 
     await svc.telegram_client.aclose()
@@ -1173,14 +1205,14 @@ async def test_stars_payment_for_other_user_credits_beneficiary_only(tmp_path) -
     beneficiary_user = await repo.get_user_by_id(beneficiary.id)
     assert payer_user is not None
     assert beneficiary_user is not None
-    starter = svc.sales_catalog.package_by_id("starter-100")
+    starter = svc.sales_catalog.package_by_id("starter-package")
     assert starter is not None
     stars_price = svc._stars_price(starter)
     assert stars_price is not None
 
     await svc._start_package_payment(
         payer_user,
-        "starter-100",
+        "starter-package",
         "telegram_stars",
         beneficiary_user=beneficiary_user,
     )
@@ -1243,7 +1275,7 @@ async def test_stars_payment_for_other_user_credits_beneficiary_only(tmp_path) -
 
     beneficiary_wallet = await repo.get_wallet("telegram:u2")
     payer_wallet = await repo.get_wallet("telegram:u1")
-    assert beneficiary_wallet.text_units_remaining == 100
+    assert beneficiary_wallet.text_units_remaining == starter.credits.text_units
     assert payer_wallet.text_units_remaining == 0
     assert any(msg["chat_id"] == "c2" and "شارژ" in msg["text"] for msg in tg.sent_messages)
     assert any(msg["chat_id"] == "c1" and "برای" in msg["text"] for msg in tg.sent_messages)
@@ -1279,7 +1311,7 @@ async def test_telegram_ton_wallet_payment_creates_link_and_order(tmp_path) -> N
 
     user = await repo.get_user_by_id(payer.id)
     assert user is not None
-    await svc._start_package_payment(user, "starter-100", "telegram_ton_wallet")
+    await svc._start_package_payment(user, "starter-package", "telegram_ton_wallet")
 
     assert tg.sent_messages
     last = tg.sent_messages[-1]
@@ -1325,7 +1357,7 @@ async def test_telegram_ton_wallet_paid_auto_credits(tmp_path) -> None:
 
     user = await repo.get_user_by_id(payer.id)
     assert user is not None
-    await svc._start_package_payment(user, "starter-100", "telegram_ton_wallet")
+    await svc._start_package_payment(user, "starter-package", "telegram_ton_wallet")
     order = await repo.get_payment_order(1)
     assert order is not None
     assert order.account_id is not None
@@ -1340,10 +1372,14 @@ async def test_telegram_ton_wallet_paid_auto_credits(tmp_path) -> None:
     assert updated is not None
     assert updated.status == "APPROVED"
     wallet = await repo.get_wallet("telegram:u1")
-    assert wallet.text_units_remaining == 100
-    assert wallet.voice_minutes_remaining == 10
-    assert wallet.photo_count_remaining == 10
+    starter = svc.sales_catalog.package_by_id("starter-package")
+    assert starter is not None
+    assert wallet.text_units_remaining == starter.credits.text_units
+    assert wallet.voice_minutes_remaining == starter.credits.voice_minutes
+    assert wallet.photo_count_remaining == starter.credits.photo_count
     assert any("پرداخت تون" in msg["text"] for msg in tg.sent_messages)
+    assert await _audit_count(db_file, "payment.order.created") >= 1
+    assert await _audit_count(db_file, "payment.approved") >= 1
 
     await svc.telegram_client.aclose()
     await svc.bale_client.aclose()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from bridge.db_url import parse_db_url
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -50,6 +51,11 @@ def _list(name: str, default: list[str]) -> list[str]:
 class Settings:
     app_env: str
     log_level: str
+    log_format: str
+    log_retention_days: int
+    log_cleanup_interval_sec: int
+    audit_events_enabled: bool
+    audit_capture_full_text: bool
     tz: str
     app_lang: str
 
@@ -129,6 +135,11 @@ def load_settings(env_file: str = ".env") -> Settings:
     settings = Settings(
         app_env=_str("APP_ENV", "development"),
         log_level=_str("LOG_LEVEL", "INFO"),
+        log_format=_str("LOG_FORMAT", "json").strip().lower() or "json",
+        log_retention_days=max(1, _int("LOG_RETENTION_DAYS", 30)),
+        log_cleanup_interval_sec=max(60, _int("LOG_CLEANUP_INTERVAL_SEC", 3600)),
+        audit_events_enabled=_bool("AUDIT_EVENTS_ENABLED", True),
+        audit_capture_full_text=_bool("AUDIT_CAPTURE_FULL_TEXT", True),
         tz=_str("TZ", "Asia/Tehran"),
         app_lang=_str("APP_LANG", "fa"),
         telegram_bot_token=_str("TELEGRAM_BOT_TOKEN", ""),
@@ -191,6 +202,8 @@ def load_settings(env_file: str = ".env") -> Settings:
 
     if settings.telegram_button_style_mode not in {"none", "auto"}:
         settings.telegram_button_style_mode = "none"
+    if settings.log_format not in {"json", "plain"}:
+        settings.log_format = "json"
 
     if not settings.telegram_bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -198,16 +211,18 @@ def load_settings(env_file: str = ".env") -> Settings:
         raise ValueError("BALE_BOT_TOKEN is required")
 
     Path(settings.media_tmp_dir).mkdir(parents=True, exist_ok=True)
-    Path(_db_path_from_url(settings.db_url)).parent.mkdir(parents=True, exist_ok=True)
+    parsed_db = parse_db_url(settings.db_url)
+    if parsed_db.backend == "sqlite" and parsed_db.sqlite_path:
+        Path(parsed_db.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
     Path(settings.sales_config_path).parent.mkdir(parents=True, exist_ok=True)
     return settings
 
 
 def _db_path_from_url(db_url: str) -> str:
-    prefix = "sqlite+aiosqlite:///"
-    if not db_url.startswith(prefix):
-        raise ValueError("Only sqlite+aiosqlite DB_URL is supported in v1")
-    return db_url.removeprefix(prefix)
+    parsed = parse_db_url(db_url)
+    if parsed.backend != "sqlite" or not parsed.sqlite_path:
+        raise ValueError("DB_URL is not sqlite")
+    return parsed.sqlite_path
 
 
 def sqlite_path(settings: Settings) -> str:

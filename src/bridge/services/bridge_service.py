@@ -183,6 +183,7 @@ class BridgeService:
                 )
             ),
             asyncio.create_task(self._outbox_worker()),
+            asyncio.create_task(self._log_cleanup_worker()),
         ]
         if self.crypto_pay_client:
             tasks.append(asyncio.create_task(self._telegram_ton_pay_worker()))
@@ -230,6 +231,121 @@ class BridgeService:
             return self.telegram_client
         return self.bale_client
 
+    @staticmethod
+    def _incoming_text_raw(incoming: IncomingMessage) -> str | None:
+        if incoming.text:
+            text = incoming.text.strip()
+            if text:
+                return text
+        if incoming.caption:
+            caption = incoming.caption.strip()
+            if caption:
+                return caption
+        return None
+
+    async def _emit_audit_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        platform: Platform | None = None,
+        user: User | None = None,
+        user_id: int | None = None,
+        chat_id: str | None = None,
+        target_user_id: int | None = None,
+        message_id: int | None = None,
+        update_id: int | None = None,
+        text_raw: str | None = None,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+    ) -> None:
+        resolved_platform = platform or (user.platform if user else None)
+        resolved_user_id = user.id if user else user_id
+        resolved_chat_id = chat_id or (user.chat_id if user else None)
+        normalized_status = status.strip().upper() if status else "OK"
+
+        payload_data = dict(payload or {})
+        if update_id is not None and "update_id" not in payload_data:
+            payload_data["update_id"] = update_id
+        if error and "error" not in payload_data:
+            payload_data["error"] = error
+
+        logger.info(
+            "audit_event",
+            extra={
+                "event": event_type,
+                "platform": resolved_platform.value if resolved_platform else None,
+                "user_id": resolved_user_id,
+                "chat_id": resolved_chat_id,
+                "update_id": update_id,
+                "status": normalized_status,
+                "error": error,
+                "details": payload_data or None,
+            },
+        )
+
+        if not self.settings.audit_events_enabled:
+            return
+
+        try:
+            await self.repository.log_audit_event(
+                event_type=event_type,
+                status=normalized_status,
+                platform=resolved_platform,
+                user_id=resolved_user_id,
+                chat_id=resolved_chat_id,
+                target_user_id=target_user_id,
+                message_id=message_id,
+                text_raw=text_raw if self.settings.audit_capture_full_text else None,
+                payload=payload_data or None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist audit event %s: %s",
+                event_type,
+                exc,
+                extra={
+                    "event": "audit.persist_failed",
+                    "platform": resolved_platform.value if resolved_platform else None,
+                    "user_id": resolved_user_id,
+                    "chat_id": resolved_chat_id,
+                    "status": "FAILED",
+                    "error": str(exc),
+                },
+            )
+
+    async def _log_cleanup_worker(self) -> None:
+        retention_days = max(1, int(self.settings.log_retention_days))
+        interval = max(60, int(self.settings.log_cleanup_interval_sec))
+        while not self._stop_event.is_set():
+            try:
+                cutoff_iso = (utc_now() - timedelta(days=retention_days)).isoformat()
+                audit_deleted, message_deleted = await self.repository.cleanup_old_logs(cutoff_iso)
+                if audit_deleted or message_deleted:
+                    logger.info(
+                        "log_cleanup",
+                        extra={
+                            "event": "logs.cleanup",
+                            "status": "OK",
+                            "details": {
+                                "cutoff_iso": cutoff_iso,
+                                "audit_deleted": audit_deleted,
+                                "message_log_deleted": message_deleted,
+                            },
+                        },
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "log cleanup failed: %s",
+                    exc,
+                    extra={
+                        "event": "logs.cleanup",
+                        "status": "FAILED",
+                        "error": str(exc),
+                    },
+                )
+            await asyncio.sleep(interval)
+
     async def _poll_loop(self, platform: Platform, timeout: int, allowed_updates: list[str]) -> None:
         offset: int | None = None
         client = self._client(platform)
@@ -273,6 +389,22 @@ class BridgeService:
 
     async def _process_incoming(self, incoming: IncomingMessage) -> None:
         if incoming.is_callback and incoming.chat_type != "private":
+            await self._emit_audit_event(
+                event_type="incoming.message",
+                status="RECEIVED",
+                platform=incoming.platform,
+                chat_id=incoming.chat_id,
+                message_id=incoming.message_id,
+                update_id=incoming.update_id,
+                text_raw=self._incoming_text_raw(incoming),
+                payload={
+                    "content_type": incoming.content_type.value,
+                    "chat_type": incoming.chat_type,
+                    "is_callback": incoming.is_callback,
+                    "callback_data": incoming.callback_data,
+                    "platform_user_id": incoming.user_id,
+                },
+            )
             await self._handle_admin_callback(incoming)
             return
 
@@ -287,6 +419,21 @@ class BridgeService:
 
         if self._is_duplicate_interaction(user, incoming):
             return
+
+        await self._emit_audit_event(
+            event_type="incoming.message",
+            status="RECEIVED",
+            user=user,
+            message_id=incoming.message_id,
+            update_id=incoming.update_id,
+            text_raw=self._incoming_text_raw(incoming),
+            payload={
+                "content_type": incoming.content_type.value,
+                "chat_type": incoming.chat_type,
+                "is_callback": incoming.is_callback,
+                "callback_data": incoming.callback_data,
+            },
+        )
 
         if incoming.is_callback:
             await self._handle_callback(user, incoming)
@@ -329,6 +476,12 @@ class BridgeService:
         if command == "end":
             if user.is_registered:
                 await self.repository.clear_active_session(user.id)
+                await self._emit_audit_event(
+                    event_type="session.ended",
+                    status="OK",
+                    user=user,
+                    payload={"source": "command:/end"},
+                )
                 await self._send_main_menu(user, "⛔ اتصال فعال پایان یافت.")
             else:
                 await self._send_text(user.platform, user.chat_id, "ابتدا ثبت‌نام کنید.", keyboard=pre_login_menu())
@@ -422,6 +575,12 @@ class BridgeService:
         if state and state.state == FlowState.REG_WAIT_TERMS:
             if text == BTN_ACCEPT_TERMS:
                 await self.repository.mark_terms_accepted(user.id)
+                await self._emit_audit_event(
+                    event_type="auth.terms.accepted",
+                    status="OK",
+                    user=user,
+                    payload={"source": "text_button"},
+                )
                 await self.repository.set_user_state(user.id, FlowState.REG_WAIT_PHONE, {})
                 await self._send_text(
                     user.platform,
@@ -476,6 +635,13 @@ class BridgeService:
                 return
 
             await self.repository.complete_registration(user.id, phone)
+            await self._emit_audit_event(
+                event_type="auth.registration.completed",
+                status="OK",
+                user=user,
+                text_raw=phone,
+                payload={"source": "shared_or_typed_phone"},
+            )
             await self.repository.clear_user_state(user.id)
             fresh = await self.repository.get_user_by_id(user.id)
             if not fresh:
@@ -510,6 +676,13 @@ class BridgeService:
                 return
 
             await self.repository.complete_registration(user.id, phone)
+            await self._emit_audit_event(
+                event_type="auth.registration.completed",
+                status="OK",
+                user=user,
+                text_raw=phone,
+                payload={"source": "manual_phone"},
+            )
             await self.repository.clear_user_state(user.id)
             fresh = await self.repository.get_user_by_id(user.id)
             if not fresh:
@@ -633,6 +806,13 @@ class BridgeService:
                 return True
 
             await self.repository.set_active_session(user.id, target.id)
+            await self._emit_audit_event(
+                event_type="session.connected",
+                status="OK",
+                user=user,
+                target_user_id=target.id,
+                payload={"source": "connect_flow"},
+            )
             await self.repository.clear_user_state(user.id)
             await self._send_text(
                 user.platform,
@@ -741,6 +921,13 @@ class BridgeService:
                 await self._send_text(user.platform, user.chat_id, f"ذخیره مخاطب ناموفق بود: {exc}")
                 return True
 
+            await self._emit_audit_event(
+                event_type="contact.added",
+                status="OK",
+                user=user,
+                target_user_id=target_user_id,
+                payload={"contact_id": entry.id, "alias": entry.alias},
+            )
             await self.repository.clear_user_state(user.id)
             await self._send_main_menu(user, f"✅ مخاطب ذخیره شد: {entry.alias}")
             return True
@@ -895,6 +1082,18 @@ class BridgeService:
                 target_username=target_username or None,
                 note=note,
             )
+            await self._emit_audit_event(
+                event_type="admin.request.created",
+                status="OK",
+                user=user,
+                text_raw=note,
+                payload={
+                    "request_id": request_id,
+                    "target_platform": target_platform.value,
+                    "target_phone": target_phone or None,
+                    "target_username": target_username or None,
+                },
+            )
             delivered = await self._notify_admins(request_id, user, target_platform, target_phone, target_username, note)
             await self.repository.clear_user_state(user.id)
 
@@ -917,6 +1116,13 @@ class BridgeService:
         if active_target:
             if text == BTN_END_SESSION:
                 await self.repository.clear_active_session(user.id)
+                await self._emit_audit_event(
+                    event_type="session.ended",
+                    status="OK",
+                    user=user,
+                    target_user_id=active_target.id,
+                    payload={"source": "menu_button"},
+                )
                 await self._send_main_menu(user, "⛔ اتصال فعال قطع شد.")
                 return
 
@@ -1022,6 +1228,12 @@ class BridgeService:
                 return
             if action == "accept":
                 await self.repository.mark_terms_accepted(user.id)
+                await self._emit_audit_event(
+                    event_type="auth.terms.accepted",
+                    status="OK",
+                    user=user,
+                    payload={"source": "inline_callback"},
+                )
                 await self.repository.set_user_state(user.id, FlowState.REG_WAIT_PHONE, {})
                 await self._send_text(
                     user.platform,
@@ -1178,6 +1390,13 @@ class BridgeService:
                 await self._show_contacts(user, "کاربر مقصد یافت نشد.", page=page)
                 return
             await self.repository.set_active_session(user.id, target.id)
+            await self._emit_audit_event(
+                event_type="session.connected",
+                status="OK",
+                user=user,
+                target_user_id=target.id,
+                payload={"source": "contact_callback", "contact_id": contact.id},
+            )
             await self._send_text(
                 user.platform,
                 user.chat_id,
@@ -1199,6 +1418,13 @@ class BridgeService:
                 await self._show_contacts(user, "کاربر مقصد یافت نشد.", page=page)
                 return
             await self.repository.add_block(user.id, target.id)
+            await self._emit_audit_event(
+                event_type="contact.blocked",
+                status="OK",
+                user=user,
+                target_user_id=target.id,
+                payload={"contact_id": contact.id},
+            )
             await self._send_profile(user, contact, target, page=page, preface="🚫 مخاطب بلاک شد.")
             return
 
@@ -1215,6 +1441,13 @@ class BridgeService:
                 await self._show_contacts(user, "کاربر مقصد یافت نشد.", page=page)
                 return
             await self.repository.remove_block(user.id, target.id)
+            await self._emit_audit_event(
+                event_type="contact.unblocked",
+                status="OK",
+                user=user,
+                target_user_id=target.id,
+                payload={"contact_id": contact.id},
+            )
             await self._send_profile(user, contact, target, page=page, preface="✅ مخاطب از بلاک خارج شد.")
             return
 
@@ -1223,6 +1456,12 @@ class BridgeService:
             if contact_id is None:
                 return
             await self.repository.delete_contact(user.id, contact_id)
+            await self._emit_audit_event(
+                event_type="contact.deleted",
+                status="OK",
+                user=user,
+                payload={"contact_id": contact_id},
+            )
             await self._show_contacts(user, "🗑 مخاطب حذف شد.", page=page)
             return
 
@@ -1240,6 +1479,13 @@ class BridgeService:
                 return
 
             await self.repository.set_active_session(user.id, source_user.id)
+            await self._emit_audit_event(
+                event_type="session.connected",
+                status="OK",
+                user=user,
+                target_user_id=source_user.id,
+                payload={"source": parts[1]},
+            )
             if parts[1] == "connect":
                 await self._send_text(
                     user.platform,
@@ -1556,6 +1802,13 @@ class BridgeService:
                 except Exception as exc:
                     logger.warning("Failed to notify requester %s for matched admin request: %s", requester_user_id, exc)
             await self.repository.mark_admin_request_matched(request_id, user.id)
+            await self._emit_audit_event(
+                event_type="admin.request.matched",
+                status="OK",
+                user_id=requester_user_id,
+                target_user_id=user.id,
+                payload={"request_id": request_id, "joined_platform": user.platform.value},
+            )
 
     async def _grant_starter_credits_if_needed(self, user: User) -> None:
         identity_key = self._wallet_identity(user)
@@ -1777,6 +2030,13 @@ class BridgeService:
             )
             if not approved:
                 return
+            await self._emit_audit_event(
+                event_type="payment.approved",
+                status="OK",
+                user_id=approved.requester_user_id,
+                target_user_id=approved.beneficiary_user_id,
+                payload={"order_id": approved.id, "payment_method": approved.payment_method, "source": "crypto_pay"},
+            )
             await self._credit_package_if_needed(approved)
             await self._notify_ton_order_success(approved)
             return
@@ -1787,6 +2047,18 @@ class BridgeService:
             )
             if not rejected:
                 return
+            await self._emit_audit_event(
+                event_type="payment.rejected",
+                status="OK",
+                user_id=rejected.requester_user_id,
+                target_user_id=rejected.beneficiary_user_id,
+                payload={
+                    "order_id": rejected.id,
+                    "payment_method": rejected.payment_method,
+                    "source": "crypto_pay",
+                    "reason": status,
+                },
+            )
             await self._notify_wallet_credited(
                 rejected.requester_user_id,
                 f"❌ پرداخت تون بسته {rejected.package_id} ناموفق/منقضی شد ({status}).",
@@ -2152,7 +2424,7 @@ class BridgeService:
             return
 
         payload = f"stars:{package.id}:{user.id}:{uuid4().hex[:12]}"
-        await self.repository.create_payment_order(
+        order = await self.repository.create_payment_order(
             requester_user_id=user.id,
             beneficiary_user_id=beneficiary.id,
             identity_key=identity_key,
@@ -2166,6 +2438,13 @@ class BridgeService:
             receipt_file_id=None,
             receipt_file_platform=None,
             receipt_caption=None,
+        )
+        await self._emit_audit_event(
+            event_type="payment.order.created",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"order_id": order.id, "payment_method": order.payment_method, "package_id": order.package_id},
         )
 
         try:
@@ -2192,6 +2471,13 @@ class BridgeService:
             user.chat_id,
             "فاکتور استار ارسال شد. پس از پرداخت، تراکنش برای بررسی ادمین به کانال فندق ارسال می‌شود.",
             keyboard=main_menu(),
+        )
+        await self._emit_audit_event(
+            event_type="payment.invoice.sent",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"payment_method": "telegram_stars", "package_id": package.id, "invoice_payload": payload},
         )
 
     async def _start_telegram_ton_wallet_payment(self, user: User, beneficiary: User, package: SalesPackage, method) -> None:
@@ -2238,7 +2524,7 @@ class BridgeService:
             )
             return
 
-        await self.repository.create_payment_order(
+        order = await self.repository.create_payment_order(
             requester_user_id=user.id,
             beneficiary_user_id=beneficiary.id,
             identity_key=identity_key,
@@ -2252,6 +2538,13 @@ class BridgeService:
             receipt_file_id=None,
             receipt_file_platform=None,
             receipt_caption=None,
+        )
+        await self._emit_audit_event(
+            event_type="payment.order.created",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"order_id": order.id, "payment_method": order.payment_method, "package_id": order.package_id},
         )
 
         keyboard = {
@@ -2270,6 +2563,13 @@ class BridgeService:
             "پس از پرداخت موفق، اعتبار به‌صورت خودکار شارژ می‌شود."
             f"{beneficiary_line}",
             keyboard=keyboard,
+        )
+        await self._emit_audit_event(
+            event_type="payment.invoice.sent",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"payment_method": "telegram_ton_wallet", "package_id": package.id, "invoice_payload": payload},
         )
 
     async def _start_bale_wallet_payment(self, user: User, beneficiary: User, package: SalesPackage, method) -> None:
@@ -2295,7 +2595,7 @@ class BridgeService:
             return
 
         payload = f"balewallet:{package.id}:{user.id}:{uuid4().hex[:12]}"
-        await self.repository.create_payment_order(
+        order = await self.repository.create_payment_order(
             requester_user_id=user.id,
             beneficiary_user_id=beneficiary.id,
             identity_key=identity_key,
@@ -2309,6 +2609,13 @@ class BridgeService:
             receipt_file_id=None,
             receipt_file_platform=None,
             receipt_caption=None,
+        )
+        await self._emit_audit_event(
+            event_type="payment.order.created",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"order_id": order.id, "payment_method": order.payment_method, "package_id": order.package_id},
         )
 
         description = package.description or f"خرید {package.title}"
@@ -2346,6 +2653,13 @@ class BridgeService:
             user.chat_id,
             "فاکتور کیف پول بله ارسال شد. پس از پرداخت، تراکنش برای بررسی ادمین به کانال فندق ارسال می‌شود.",
             keyboard=main_menu(),
+        )
+        await self._emit_audit_event(
+            event_type="payment.invoice.sent",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            payload={"payment_method": "bale_wallet", "package_id": package.id, "invoice_payload": payload},
         )
 
     async def _start_manual_bank_payment(self, user: User, beneficiary: User, package: SalesPackage, method) -> None:
@@ -2477,6 +2791,15 @@ class BridgeService:
             receipt_file_id=incoming.source_file_id,
             receipt_file_platform=incoming.platform,
             receipt_caption=incoming.caption,
+        )
+        await self._emit_audit_event(
+            event_type="payment.order.created",
+            status="OK",
+            user=user,
+            target_user_id=beneficiary.id,
+            message_id=incoming.message_id,
+            text_raw=incoming.caption,
+            payload={"order_id": order.id, "payment_method": order.payment_method, "package_id": order.package_id},
         )
 
         try:
@@ -2860,6 +3183,15 @@ class BridgeService:
             )
             if not updated or updated.status != "APPROVED":
                 return
+            await self._emit_audit_event(
+                event_type="payment.approved",
+                status="OK",
+                platform=incoming.platform,
+                user_id=updated.requester_user_id,
+                target_user_id=updated.beneficiary_user_id,
+                update_id=incoming.update_id,
+                payload={"order_id": updated.id, "payment_method": updated.payment_method, "source": "admin_callback"},
+            )
             await self._credit_package_if_needed(updated)
             if updated.beneficiary_user_id == updated.requester_user_id:
                 await self._notify_wallet_credited(
@@ -2889,6 +3221,15 @@ class BridgeService:
             )
             if not updated or updated.status != "REJECTED":
                 return
+            await self._emit_audit_event(
+                event_type="payment.rejected",
+                status="OK",
+                platform=incoming.platform,
+                user_id=updated.requester_user_id,
+                target_user_id=updated.beneficiary_user_id,
+                update_id=incoming.update_id,
+                payload={"order_id": updated.id, "payment_method": updated.payment_method, "source": "admin_callback"},
+            )
             await self._notify_wallet_credited(
                 updated.requester_user_id,
                 f"❌ پرداخت بسته {updated.package_id} رد شد. در صورت نیاز، پرداخت را دوباره ثبت کنید.",
@@ -2963,6 +3304,16 @@ class BridgeService:
                 status=DeliveryStatus.SENT,
                 error=None,
             )
+            await self._emit_audit_event(
+                event_type="delivery.sent",
+                status="SENT",
+                user=source_user,
+                target_user_id=target.id,
+                message_id=incoming.message_id,
+                update_id=incoming.update_id,
+                text_raw=self._incoming_text_raw(incoming),
+                payload={"mode": "immediate", "content_type": incoming.content_type.value},
+            )
             await self._send_text(
                 source_user.platform,
                 source_user.chat_id,
@@ -2979,6 +3330,17 @@ class BridgeService:
                 dest_platform=target.platform,
                 content_type=incoming.content_type,
                 status=DeliveryStatus.FAILED,
+                error=str(exc),
+            )
+            await self._emit_audit_event(
+                event_type="delivery.failed",
+                status="FAILED",
+                user=source_user,
+                target_user_id=target.id,
+                message_id=incoming.message_id,
+                update_id=incoming.update_id,
+                text_raw=self._incoming_text_raw(incoming),
+                payload={"mode": "immediate", "content_type": incoming.content_type.value, "reason": reason},
                 error=str(exc),
             )
             if self._is_retryable_delivery_error(exc):
@@ -3121,6 +3483,20 @@ class BridgeService:
             expires_at=expires_at.isoformat(),
         )
         self.metrics.queued_total += 1
+        source_user = await self.repository.get_user_by_id(source_user_id)
+        await self._emit_audit_event(
+            event_type="delivery.queued",
+            status="QUEUED",
+            user=source_user,
+            user_id=source_user_id,
+            target_user_id=dest_user_id,
+            text_raw=text if content_type == ContentType.TEXT else caption,
+            payload={
+                "content_type": content_type.value,
+                "next_retry_at": (now + retry_in).isoformat(),
+                "expires_at": expires_at.isoformat(),
+            },
+        )
 
     async def _outbox_worker(self) -> None:
         while not self._stop_event.is_set():
@@ -3142,16 +3518,37 @@ class BridgeService:
         now = utc_now()
         if parse_iso(item.expires_at) <= now:
             await self.repository.mark_outbox_expired(item.id, "Retry window expired")
+            await self._emit_audit_event(
+                event_type="delivery.expired",
+                status="EXPIRED",
+                user_id=item.source_user_id,
+                target_user_id=item.dest_user_id,
+                payload={"outbox_id": item.id, "reason": "Retry window expired"},
+            )
             return
 
         source_user = await self.repository.get_user_by_id(item.source_user_id)
         dest_user = await self.repository.get_user_by_id(item.dest_user_id)
         if not source_user or not dest_user:
             await self.repository.mark_outbox_expired(item.id, "Source or destination user missing")
+            await self._emit_audit_event(
+                event_type="delivery.expired",
+                status="EXPIRED",
+                user_id=item.source_user_id,
+                target_user_id=item.dest_user_id,
+                payload={"outbox_id": item.id, "reason": "Source or destination user missing"},
+            )
             return
 
         if await self.repository.is_blocked(dest_user.id, source_user.id):
             await self.repository.mark_outbox_expired(item.id, "Blocked by destination user")
+            await self._emit_audit_event(
+                event_type="delivery.expired",
+                status="EXPIRED",
+                user=source_user,
+                target_user_id=dest_user.id,
+                payload={"outbox_id": item.id, "reason": "Blocked by destination user"},
+            )
             return
 
         source_platform = item.source_file_platform or source_user.platform
@@ -3178,6 +3575,14 @@ class BridgeService:
                 status=DeliveryStatus.SENT,
                 error=None,
             )
+            await self._emit_audit_event(
+                event_type="delivery.sent",
+                status="SENT",
+                user=source_user,
+                target_user_id=dest_user.id,
+                text_raw=item.text if item.content_type == ContentType.TEXT else item.caption,
+                payload={"mode": "outbox", "outbox_id": item.id, "content_type": item.content_type.value},
+            )
         except Exception as exc:
             attempts = item.attempts + 1
             delay = min(self.settings.queue_retry_base_sec * (2**max(attempts - 1, 0)), self.settings.queue_retry_max_sec)
@@ -3185,12 +3590,35 @@ class BridgeService:
 
             if next_retry >= parse_iso(item.expires_at):
                 await self.repository.mark_outbox_expired(item.id, str(exc))
+                await self._emit_audit_event(
+                    event_type="delivery.expired",
+                    status="EXPIRED",
+                    user=source_user,
+                    target_user_id=dest_user.id,
+                    text_raw=item.text if item.content_type == ContentType.TEXT else item.caption,
+                    payload={"mode": "outbox", "outbox_id": item.id, "reason": "retry window exhausted"},
+                    error=str(exc),
+                )
                 return
 
             await self.repository.mark_outbox_retry(
                 item.id,
                 attempts=attempts,
                 next_retry_at=next_retry.isoformat(),
+                error=str(exc),
+            )
+            await self._emit_audit_event(
+                event_type="delivery.retry",
+                status="RETRY",
+                user=source_user,
+                target_user_id=dest_user.id,
+                text_raw=item.text if item.content_type == ContentType.TEXT else item.caption,
+                payload={
+                    "mode": "outbox",
+                    "outbox_id": item.id,
+                    "attempts": attempts,
+                    "next_retry_at": next_retry.isoformat(),
+                },
                 error=str(exc),
             )
 
@@ -3357,6 +3785,13 @@ class BridgeService:
             return
 
         await self.repository.set_active_session(user.id, target.id)
+        await self._emit_audit_event(
+            event_type="session.connected",
+            status="OK",
+            user=user,
+            target_user_id=target.id,
+            payload={"source": "connect_user_command"},
+        )
         await self.repository.clear_user_state(user.id)
         await self._send_text(
             user.platform,

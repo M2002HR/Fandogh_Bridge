@@ -29,6 +29,10 @@
 - نرخ USDT ثابت و قابل تنظیم از `.env` (بدون نمایش نرخ تبدیل به کاربر)
 - گزینه جداگانه برای ارتباط با پشتیبانی
 - بهبود UI تلگرام با دکمه‌های رنگی (Button Style)، منوی Commands و لیست Commands
+- دیتابیس عملیاتی روی MySQL 8
+- پنل حرفه‌ای MySQL با phpMyAdmin
+- لاگ مرکزی روی Elasticsearch + Kibana + Fluent Bit
+- داشبورد آماده Kibana برای فعالیت کاربر و خطاهای ارسال
 
 ## Quick Start
 
@@ -58,10 +62,49 @@ python -m bridge.dev
 docker compose up --build -d
 ```
 
+پس از بالا آمدن سرویس‌ها:
+
+- MySQL Panel (phpMyAdmin): `http://127.0.0.1:18082`
+- Elasticsearch API: `http://127.0.0.1:19200`
+- Kibana: `http://127.0.0.1:15601`
+- Kibana Login: `KIBANA_VIEWER_USERNAME` / `KIBANA_VIEWER_PASSWORD`
+
+داشبورد آماده Kibana:
+
+- `Fandogh - User Activity Dashboard`
+
+اگر قبلاً SQLite داشته‌اید و می‌خواهید داده‌ها را به MySQL منتقل کنید:
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/migrate_sqlite_to_mysql.py --sqlite ./app_data/bridge.db
+```
+
 ## نکات کانفیگ
 
 - `ADMIN_IDS` برای اطلاع‌رسانی ادمین:
   - نمونه: `telegram:123456789,bale:987654321`
+- تنظیمات لاگ و audit:
+  - `LOG_FORMAT=json` (یا `plain`)
+  - `HTTPX_LOG_LEVEL=WARNING` (پیش‌فرض: لاگ‌های شبکه خام tokenدار وارد ES نشوند)
+  - `LOG_RETENTION_DAYS=30`
+  - `LOG_CLEANUP_INTERVAL_SEC=3600`
+  - `AUDIT_EVENTS_ENABLED=true`
+  - `AUDIT_CAPTURE_FULL_TEXT=true`
+- تنظیمات MySQL:
+  - `MYSQL_ROOT_PASSWORD`
+  - `MYSQL_DATABASE`
+  - `MYSQL_USER`
+  - `MYSQL_PASSWORD`
+  - `DB_URL=mysql+aiomysql://...`
+- تنظیمات Elastic/Kibana:
+  - `ELASTIC_PASSWORD`
+  - `KIBANA_SYSTEM_PASSWORD`
+  - `ELASTIC_INGEST_USERNAME`
+  - `ELASTIC_INGEST_PASSWORD`
+  - `KIBANA_VIEWER_USERNAME`
+  - `KIBANA_VIEWER_PASSWORD`
+  - `KIBANA_ENCRYPTION_KEY`
 - `TELEGRAM_ADMIN_CHANNEL_ID` برای ارسال اعلان به کانال تلگرام:
   - برای کانال خصوصی باید `chat_id` عددی (مثل `-100...`) تنظیم شود.
   - اگر مقدار را به شکل `100...` بگذارید، برنامه خودش به `-100...` تبدیل می‌کند.
@@ -98,7 +141,7 @@ docker compose up --build -d
   - `TELEGRAM_ALLOWED_UPDATES=["message","callback_query","pre_checkout_query"]`
   - `BALE_ALLOWED_UPDATES=["message","callback_query","pre_checkout_query"]`
 - مسیرها:
-  - `DB_URL=sqlite+aiosqlite:///./app_data/bridge.db`
+  - `DB_URL=mysql+aiomysql://fandogh_app:...@mysql:3306/fandogh`
   - `MEDIA_TMP_DIR=./app_tmp_media`
   - `SALES_CONFIG_PATH=./config/sales_catalog.json`
 - تنظیمات watcher توسعه:

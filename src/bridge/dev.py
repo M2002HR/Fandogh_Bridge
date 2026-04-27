@@ -129,7 +129,7 @@ def _stop_process(process: subprocess.Popen[bytes], timeout_sec: float) -> None:
 
 
 def main() -> None:
-    configure_logging(os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging(os.getenv("LOG_LEVEL", "INFO"), os.getenv("LOG_FORMAT", "json"))
     config = load_dev_config()
     logger.info("Watching for changes in: %s", ", ".join(str(path.relative_to(config.root_dir)) for path in config.watch_paths))
 

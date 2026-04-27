@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from typing import Any
 
 import aiosqlite
 
+from bridge.db_url import ParsedDbUrl, parse_db_url
 from bridge.types import (
     CreditWallet,
     ContactEntry,
@@ -20,21 +22,50 @@ from bridge.types import (
 )
 from bridge.utils import generate_bridge_id, normalize_phone, normalize_username, utc_iso
 
+try:
+    import aiomysql  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    aiomysql = None
+
 
 class Repository:
-    def __init__(self, db_path: str, bridge_id_prefix: str, bridge_id_length: int) -> None:
-        self.db_path = db_path
+    def __init__(self, db_url: str, bridge_id_prefix: str, bridge_id_length: int) -> None:
+        self.db_url = db_url
+        self._db = parse_db_url(db_url)
         self.bridge_id_prefix = bridge_id_prefix
         self.bridge_id_length = bridge_id_length
 
+    @property
+    def _is_mysql(self) -> bool:
+        return self._db.backend == "mysql"
+
     @asynccontextmanager
     async def _connect(self):
-        conn = await aiosqlite.connect(self.db_path)
-        conn.row_factory = aiosqlite.Row
+        if self._db.backend == "sqlite":
+            conn = await aiosqlite.connect(self._db.sqlite_path or "")
+            conn.row_factory = aiosqlite.Row
+            try:
+                yield conn
+            finally:
+                await conn.close()
+            return
+
+        if aiomysql is None:  # pragma: no cover
+            raise RuntimeError("aiomysql is required for mysql backend")
+
+        mysql_conn = await aiomysql.connect(
+            host=self._db.host,
+            port=int(self._db.port or 3306),
+            user=self._db.user,
+            password=self._db.password,
+            db=self._db.database,
+            autocommit=False,
+            charset="utf8mb4",
+        )
         try:
-            yield conn
+            yield _MySQLCompatConnection(mysql_conn)
         finally:
-            await conn.close()
+            mysql_conn.close()
 
     async def get_user_by_platform_user(self, platform: Platform, platform_user_id: str) -> User | None:
         async with self._connect() as conn:
@@ -201,15 +232,27 @@ class Repository:
     async def set_active_session(self, user_id: int, target_user_id: int) -> None:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO active_sessions(user_id, target_user_id, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id)
-                DO UPDATE SET target_user_id = excluded.target_user_id, updated_at = excluded.updated_at
-                """,
-                (user_id, target_user_id, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO active_sessions(user_id, target_user_id, updated_at)
+                    VALUES (?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        target_user_id = VALUES(target_user_id),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (user_id, target_user_id, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO active_sessions(user_id, target_user_id, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id)
+                    DO UPDATE SET target_user_id = excluded.target_user_id, updated_at = excluded.updated_at
+                    """,
+                    (user_id, target_user_id, now),
+                )
             await conn.commit()
 
     async def clear_active_session(self, user_id: int) -> None:
@@ -234,13 +277,23 @@ class Repository:
     async def add_block(self, blocker_user_id: int, blocked_user_id: int) -> None:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO blocks(blocker_user_id, blocked_user_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (blocker_user_id, blocked_user_id, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO blocks(blocker_user_id, blocked_user_id, created_at)
+                    VALUES (?, ?, ?)
+                    ON DUPLICATE KEY UPDATE created_at = VALUES(created_at)
+                    """,
+                    (blocker_user_id, blocked_user_id, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT OR REPLACE INTO blocks(blocker_user_id, blocked_user_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (blocker_user_id, blocked_user_id, now),
+                )
             await conn.commit()
 
     async def remove_block(self, blocker_user_id: int, blocked_user_id: int) -> None:
@@ -271,15 +324,27 @@ class Repository:
         now = utc_iso()
 
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO contacts(owner_user_id, target_user_id, alias, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(owner_user_id, target_user_id)
-                DO UPDATE SET alias = excluded.alias, updated_at = excluded.updated_at
-                """,
-                (owner_user_id, target_user_id, alias_clean, now, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO contacts(owner_user_id, target_user_id, alias, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        alias = VALUES(alias),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (owner_user_id, target_user_id, alias_clean, now, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO contacts(owner_user_id, target_user_id, alias, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(owner_user_id, target_user_id)
+                    DO UPDATE SET alias = excluded.alias, updated_at = excluded.updated_at
+                    """,
+                    (owner_user_id, target_user_id, alias_clean, now, now),
+                )
             await conn.commit()
 
             row = await _fetchone(
@@ -340,15 +405,28 @@ class Repository:
     async def set_user_state(self, user_id: int, state: str, data: dict) -> None:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO user_states(user_id, state, state_data, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(user_id)
-                DO UPDATE SET state = excluded.state, state_data = excluded.state_data, updated_at = excluded.updated_at
-                """,
-                (user_id, state, json.dumps(data, ensure_ascii=False), now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO user_states(user_id, state, state_data, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        state = VALUES(state),
+                        state_data = VALUES(state_data),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (user_id, state, json.dumps(data, ensure_ascii=False), now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO user_states(user_id, state, state_data, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id)
+                    DO UPDATE SET state = excluded.state, state_data = excluded.state_data, updated_at = excluded.updated_at
+                    """,
+                    (user_id, state, json.dumps(data, ensure_ascii=False), now),
+                )
             await conn.commit()
 
     async def clear_user_state(self, user_id: int) -> None:
@@ -442,7 +520,7 @@ class Repository:
                 )
                 await conn.commit()
                 return True
-            except aiosqlite.IntegrityError:
+            except _INTEGRITY_ERRORS:
                 return False
 
     async def mark_admin_request_matched(self, request_id: int, matched_user_id: int) -> None:
@@ -541,15 +619,26 @@ class Repository:
     ) -> CreditWallet:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO credit_wallets(
-                    identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
-                ) VALUES (?, 0, 0, 0, ?)
-                ON CONFLICT(identity_key) DO NOTHING
-                """,
-                (identity_key, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO credit_wallets(
+                        identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
+                    ) VALUES (?, 0, 0, 0, ?)
+                    ON DUPLICATE KEY UPDATE identity_key = identity_key
+                    """,
+                    (identity_key, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO credit_wallets(
+                        identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
+                    ) VALUES (?, 0, 0, 0, ?)
+                    ON CONFLICT(identity_key) DO NOTHING
+                    """,
+                    (identity_key, now),
+                )
             await conn.execute(
                 """
                 UPDATE credit_wallets
@@ -601,15 +690,26 @@ class Repository:
     ) -> CreditWallet | None:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO credit_wallets(
-                    identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
-                ) VALUES (?, 0, 0, 0, ?)
-                ON CONFLICT(identity_key) DO NOTHING
-                """,
-                (identity_key, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO credit_wallets(
+                        identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
+                    ) VALUES (?, 0, 0, 0, ?)
+                    ON DUPLICATE KEY UPDATE identity_key = identity_key
+                    """,
+                    (identity_key, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO credit_wallets(
+                        identity_key, text_units_remaining, voice_minutes_remaining, photo_count_remaining, updated_at
+                    ) VALUES (?, 0, 0, 0, ?)
+                    ON CONFLICT(identity_key) DO NOTHING
+                    """,
+                    (identity_key, now),
+                )
             cur = await conn.execute(
                 """
                 UPDATE credit_wallets
@@ -672,20 +772,35 @@ class Repository:
     ) -> UsdtRateRecord:
         now = utc_iso()
         async with self._connect() as conn:
-            await conn.execute(
-                """
-                INSERT INTO usdt_rates(date_local, rate_toman, source, raw_text, fetched_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(date_local)
-                DO UPDATE SET
-                    rate_toman = excluded.rate_toman,
-                    source = excluded.source,
-                    raw_text = excluded.raw_text,
-                    fetched_at = excluded.fetched_at,
-                    updated_at = excluded.updated_at
-                """,
-                (date_local, rate_toman, source, raw_text, fetched_at, now),
-            )
+            if self._is_mysql:
+                await conn.execute(
+                    """
+                    INSERT INTO usdt_rates(date_local, rate_toman, source, raw_text, fetched_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        rate_toman = VALUES(rate_toman),
+                        source = VALUES(source),
+                        raw_text = VALUES(raw_text),
+                        fetched_at = VALUES(fetched_at),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (date_local, rate_toman, source, raw_text, fetched_at, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO usdt_rates(date_local, rate_toman, source, raw_text, fetched_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date_local)
+                    DO UPDATE SET
+                        rate_toman = excluded.rate_toman,
+                        source = excluded.source,
+                        raw_text = excluded.raw_text,
+                        fetched_at = excluded.fetched_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (date_local, rate_toman, source, raw_text, fetched_at, now),
+                )
             await conn.commit()
             row = await _fetchone(conn, "SELECT * FROM usdt_rates WHERE date_local = ?", (date_local,))
         record = _row_to_usdt_rate(row)
@@ -1011,7 +1126,7 @@ class Repository:
                 )
                 await conn.commit()
                 return True
-            except aiosqlite.IntegrityError:
+            except _INTEGRITY_ERRORS:
                 return False
 
     async def log_message(
@@ -1045,6 +1160,53 @@ class Repository:
                 ),
             )
             await conn.commit()
+
+    async def log_audit_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        platform: Platform | None,
+        user_id: int | None,
+        chat_id: str | None,
+        target_user_id: int | None,
+        message_id: int | None,
+        text_raw: str | None,
+        payload: dict[str, object] | None,
+    ) -> None:
+        now = utc_iso()
+        payload_json = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+        async with self._connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO audit_events(
+                    event_type, status, platform, user_id, chat_id,
+                    target_user_id, message_id, text_raw, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type,
+                    status,
+                    platform.value if platform else None,
+                    user_id,
+                    chat_id,
+                    target_user_id,
+                    message_id,
+                    text_raw,
+                    payload_json,
+                    now,
+                ),
+            )
+            await conn.commit()
+
+    async def cleanup_old_logs(self, cutoff_iso: str) -> tuple[int, int]:
+        async with self._connect() as conn:
+            audit_cur = await conn.execute("DELETE FROM audit_events WHERE created_at < ?", (cutoff_iso,))
+            message_cur = await conn.execute("DELETE FROM message_log WHERE created_at < ?", (cutoff_iso,))
+            await conn.commit()
+            audit_deleted = int(audit_cur.rowcount or 0)
+            message_deleted = int(message_cur.rowcount or 0)
+            return max(0, audit_deleted), max(0, message_deleted)
 
     async def enqueue_outbox(
         self,
@@ -1136,7 +1298,7 @@ class Repository:
             )
             await conn.commit()
 
-    async def _new_unique_bridge_id(self, conn: aiosqlite.Connection) -> str:
+    async def _new_unique_bridge_id(self, conn: Any) -> str:
         for _ in range(100):
             candidate = generate_bridge_id(self.bridge_id_prefix, self.bridge_id_length)
             row = await _fetchone(conn, "SELECT 1 FROM users WHERE bridge_id = ? LIMIT 1", (candidate,))
@@ -1145,7 +1307,38 @@ class Repository:
         raise RuntimeError("Unable to generate unique bridge_id")
 
 
-def _row_to_user(row: aiosqlite.Row | None) -> User | None:
+if aiomysql is not None:
+    _INTEGRITY_ERRORS = (aiosqlite.IntegrityError, aiomysql.IntegrityError)
+else:
+    _INTEGRITY_ERRORS = (aiosqlite.IntegrityError,)
+
+
+def _mysql_qmark_to_percent(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+class _MySQLCompatConnection:
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def execute(self, sql: str, params: tuple | list | None = None):
+        if aiomysql is None:  # pragma: no cover
+            raise RuntimeError("aiomysql is required for mysql backend")
+        cursor = await self._conn.cursor(aiomysql.DictCursor)
+        await cursor.execute(_mysql_qmark_to_percent(sql), tuple(params or ()))
+        return cursor
+
+    async def commit(self) -> None:
+        await self._conn.commit()
+
+    async def rollback(self) -> None:
+        await self._conn.rollback()
+
+    async def close(self) -> None:
+        self._conn.close()
+
+
+def _row_to_user(row: Any | None) -> User | None:
     if row is None:
         return None
     return User(
@@ -1163,7 +1356,7 @@ def _row_to_user(row: aiosqlite.Row | None) -> User | None:
     )
 
 
-def _row_to_contact(row: aiosqlite.Row) -> ContactEntry:
+def _row_to_contact(row: Any) -> ContactEntry:
     return ContactEntry(
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
@@ -1174,7 +1367,7 @@ def _row_to_contact(row: aiosqlite.Row) -> ContactEntry:
     )
 
 
-def _row_to_outbox(row: aiosqlite.Row) -> OutboxItem:
+def _row_to_outbox(row: Any) -> OutboxItem:
     return OutboxItem(
         id=int(row["id"]),
         source_user_id=int(row["source_user_id"]),
@@ -1190,7 +1383,7 @@ def _row_to_outbox(row: aiosqlite.Row) -> OutboxItem:
     )
 
 
-def _row_to_wallet(row: aiosqlite.Row | None) -> CreditWallet | None:
+def _row_to_wallet(row: Any | None) -> CreditWallet | None:
     if row is None:
         return None
     return CreditWallet(
@@ -1202,7 +1395,7 @@ def _row_to_wallet(row: aiosqlite.Row | None) -> CreditWallet | None:
     )
 
 
-def _row_to_payment_order(row: aiosqlite.Row | None) -> PaymentOrder | None:
+def _row_to_payment_order(row: Any | None) -> PaymentOrder | None:
     if row is None:
         return None
     return PaymentOrder(
@@ -1232,7 +1425,7 @@ def _row_to_payment_order(row: aiosqlite.Row | None) -> PaymentOrder | None:
     )
 
 
-def _row_to_usdt_rate(row: aiosqlite.Row | None) -> UsdtRateRecord | None:
+def _row_to_usdt_rate(row: Any | None) -> UsdtRateRecord | None:
     if row is None:
         return None
     return UsdtRateRecord(
@@ -1244,7 +1437,7 @@ def _row_to_usdt_rate(row: aiosqlite.Row | None) -> UsdtRateRecord | None:
     )
 
 
-async def _fetchone(conn: aiosqlite.Connection, sql: str, params: tuple | None = None):
+async def _fetchone(conn: Any, sql: str, params: tuple | None = None):
     cursor = await conn.execute(sql, params or ())
     try:
         return await cursor.fetchone()
@@ -1252,7 +1445,7 @@ async def _fetchone(conn: aiosqlite.Connection, sql: str, params: tuple | None =
         await cursor.close()
 
 
-async def _fetchall(conn: aiosqlite.Connection, sql: str, params: tuple | None = None):
+async def _fetchall(conn: Any, sql: str, params: tuple | None = None):
     cursor = await conn.execute(sql, params or ())
     try:
         return await cursor.fetchall()

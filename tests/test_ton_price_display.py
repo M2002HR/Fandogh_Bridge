@@ -18,6 +18,10 @@ class _DummyClient(BotApiClient):
 class _Settings:
     telegram_poll_timeout_sec = 30
     bale_poll_timeout_sec = 30
+    log_retention_days = 30
+    log_cleanup_interval_sec = 3600
+    audit_events_enabled = True
+    audit_capture_full_text = True
     telegram_allowed_updates = ["message"]
     bale_allowed_updates = ["message"]
     metrics_enabled = False

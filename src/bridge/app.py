@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bridge.config import load_settings, sqlite_path
+from bridge.config import load_settings
 from bridge.crypto_pay import CryptoPayClient
 from bridge.db import init_db
 from bridge.platforms.client import BotApiClient
@@ -13,11 +13,10 @@ from bridge.types import Platform
 
 async def build_service(env_file: str = ".env") -> BridgeService:
     settings = load_settings(env_file)
-    db_path = sqlite_path(settings)
-    await init_db(db_path)
+    await init_db(settings.db_url)
 
     repository = Repository(
-        db_path=db_path,
+        db_url=settings.db_url,
         bridge_id_prefix=settings.bridge_id_prefix,
         bridge_id_length=settings.bridge_id_length,
     )

@@ -14,7 +14,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    configure_logging(os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging(os.getenv("LOG_LEVEL", "INFO"), os.getenv("LOG_FORMAT", "json"))
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
