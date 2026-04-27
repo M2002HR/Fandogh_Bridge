@@ -1,12 +1,130 @@
 services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: ${TZ:-Asia/Tehran}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./app_data/mysql:/var/lib/mysql
+    ports:
+      - "127.0.0.1:13306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  phpmyadmin:
+    image: phpmyadmin:5.2
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_ARBITRARY: "0"
+      UPLOAD_LIMIT: 128M
+    ports:
+      - "127.0.0.1:18082:80"
+
+  elasticsearch:
+    image: elasticsearch:${ELASTIC_STACK_VERSION:-8.14.3}
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.enrollment.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      xpack.license.self_generated.type: basic
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ES_JAVA_OPTS: -Xms768m -Xmx768m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./app_data/elasticsearch:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:19200:9200"
+
+  kibana:
+    image: elastic/kibana:${ELASTIC_STACK_VERSION:-8.14.3}
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    environment:
+      SERVER_NAME: kibana
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY}
+    ports:
+      - "127.0.0.1:15601:5601"
+
+  elastic-init:
+    image: curlimages/curl:8.7.1
+    restart: "no"
+    depends_on:
+      - elasticsearch
+      - kibana
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      KIBANA_URL: http://kibana:5601
+      ELASTIC_ADMIN_USERNAME: elastic
+      ELASTIC_ADMIN_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      ELASTIC_INGEST_USERNAME: ${ELASTIC_INGEST_USERNAME}
+      ELASTIC_INGEST_PASSWORD: ${ELASTIC_INGEST_PASSWORD}
+      KIBANA_VIEWER_USERNAME: ${KIBANA_VIEWER_USERNAME}
+      KIBANA_VIEWER_PASSWORD: ${KIBANA_VIEWER_PASSWORD}
+    volumes:
+      - ./config/elastic/init-elastic.sh:/init-elastic.sh:ro
+    entrypoint: ["/bin/sh", "/init-elastic.sh"]
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.0
+    restart: unless-stopped
+    depends_on:
+      elastic-init:
+        condition: service_completed_successfully
+    environment:
+      ELASTIC_HOST: elasticsearch
+      ELASTIC_PORT: "9200"
+      ELASTIC_INGEST_USERNAME: ${ELASTIC_INGEST_USERNAME}
+      ELASTIC_INGEST_PASSWORD: ${ELASTIC_INGEST_PASSWORD}
+    volumes:
+      - ./config/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ${DOCKER_CONTAINERS_PATH:-/var/lib/docker/containers}:/var/lib/docker/containers:ro
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+
   bridge:
     build:
       context: .
-      dockerfile: Dockerfile
     image: ${DOCKER_IMAGE_TAG:-fandogh-bridge:latest}
+    restart: unless-stopped
     env_file:
       - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
     volumes:
-      - ./app_data:/app/app_data
+      - ./config:/app/config:ro
       - ./app_tmp_media:/app/app_tmp_media
-    restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
